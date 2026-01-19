@@ -216,12 +216,15 @@ def mpesa_callback():
         checkout_request_id = result["CheckoutRequestID"]
         amount = 0
         phone = ""
+        receipt = ""
         if status == 0:
             for item in result["CallbackMetadata"]["Item"]:
                 if item["Name"] == "Amount":
                     amount = item["Value"]
                 elif item["Name"] == "PhoneNumber":
                     phone = str(item["Value"])
+                elif item["Name"] == "MpesaReceiptNumber":
+                    receipt = item["Value"]
             # Update order in DB
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
@@ -231,7 +234,7 @@ def mpesa_callback():
                 order_id = row[0]
                 update_order_payment(order_id, status="paid")
                 customer_name = get_customer_name(phone)
-                send_whatsapp_message(phone, f"✅ PAYMENT RECEIVED\nOrder #{order_id}\nAmount: KES {amount}\n\nThank you {customer_name} for paying with ChatPESA 🙏")
+                send_whatsapp_message(phone, f"✅ PAYMENT RECEIVED\nOrder #{order_id}\nAmount: KES {amount}\nReceipt: {receipt}\n\nThank you {customer_name} for paying with ChatPESA 🙏")
             conn.close()
         else:
             # Payment failed
