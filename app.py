@@ -63,6 +63,10 @@ def generate_password():
     return encoded, timestamp
 
 def stk_push(phone_number, amount, account_reference):
+    # Safaricom expects phone in format 2547XXXXXXXX (no +)
+    if phone_number.startswith("+"):
+        phone_number = phone_number.replace("+", "")
+
     token = get_access_token()
     password, timestamp = generate_password()
 
@@ -86,6 +90,9 @@ def stk_push(phone_number, amount, account_reference):
     }
 
     resp = requests.post(STK_PUSH_URL, json=payload, headers=headers)
+    logging.info(f"📤 STK PUSH STATUS: {resp.status_code}")
+    logging.info(f"📤 STK PUSH RESPONSE: {resp.text}")
+
     resp.raise_for_status()
     return resp.json()
 
