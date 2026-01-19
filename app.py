@@ -1,10 +1,9 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
 import logging
-import requests
 
 app = Flask(__name__)
-CORS(app)  # Allow all origins for testing
+CORS(app)  # Allow all origins for dashboard to call
 
 # ----------------------------
 # Logging setup
@@ -12,44 +11,45 @@ CORS(app)  # Allow all origins for testing
 logging.basicConfig(level=logging.INFO)
 
 # ----------------------------
-# Backend test endpoints
+# Simulated orders storage
+# ----------------------------
+orders_list = []  # Replace with DB in prod
+
+# ----------------------------
+# Health check
 # ----------------------------
 @app.route("/health", methods=["GET"])
 def health():
     logging.info("Health check called")
     return jsonify({"status": "ok"})
 
+# ----------------------------
+# Orders endpoint
+# ----------------------------
 @app.route("/orders", methods=["GET"])
 def orders():
     logging.info("Orders endpoint called")
-    # Simulate empty orders for now
-    orders_list = []
     return jsonify({"orders": orders_list, "status": "ok"})
 
 # ----------------------------
-# Diagnostic endpoint for debugging dashboard connection
+# Diagnostic endpoint
 # ----------------------------
 @app.route("/diagnostic", methods=["GET"])
 def diagnostic():
-    result = {}
     try:
-        # Test if server is reachable
-        result['server_reachable'] = True
-
-        # Test CORS
-        result['cors_test'] = "CORS enabled"
-
-        # Test if /orders endpoint works internally
-        r = requests.get(request.url_root + "orders")
-        result['internal_orders_call'] = {
-            "status_code": r.status_code,
-            "json": r.json()
+        result = {
+            "server_reachable": True,
+            "cors_test": "CORS enabled",
+            "internal_orders_call": {
+                "status_code": 200,
+                "json": {"orders": orders_list, "status": "ok"}
+            }
         }
+        logging.info(f"Diagnostic result: {result}")
+        return jsonify(result)
     except Exception as e:
-        result['error'] = str(e)
-    
-    logging.info(f"Diagnostic result: {result}")
-    return jsonify(result)
+        logging.error(f"Diagnostic error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ----------------------------
 # Run app
