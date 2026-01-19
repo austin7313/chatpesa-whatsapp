@@ -6,6 +6,7 @@ import base64
 from datetime import datetime
 import logging
 import os
+import sqlite3
 
 app = Flask(__name__)
 
@@ -17,8 +18,6 @@ MPESA_CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
 MPESA_SHORTCODE = "4031193"
 MPESA_PASSKEY = "5a64ad290753ed331b662cf6d83d3149367867c102f964f522390ccbd85cb282"
 MPESA_CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
-MPESA_ENV = "production"  # production endpoint
-
 TOKEN_URL = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
 STK_PUSH_URL = "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
 
@@ -37,13 +36,82 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 logging.basicConfig(level=logging.INFO, filename="mpesa_bot.log")
 
 # ----------------------------
-# In-memory storage (replace with DB later)
+# Database Setup
 # ----------------------------
-orders = {}       # phone_number -> {order_id, amount, status, checkout_id, customer_name}
-order_counter = 1 # global order numbering
+DB_FILE = "chatpesa.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS customers (
+            phone TEXT PRIMARY KEY,
+            name TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT,
+            amount REAL,
+            status TEXT,
+            checkout_id TEXT,
+            created_at TEXT,
+            FOREIGN KEY(phone) REFERENCES customers(phone)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def save_customer(phone, name):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO customers (phone, name) VALUES (?, ?)", (phone, name))
+    conn.commit()
+    conn.close()
+
+def create_order(phone, amount):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    timestamp = datetime.now().isoformat()
+    c.execute("INSERT INTO orders (phone, amount, status, created_at) VALUES (?, ?, 'pending', ?)", (phone, amount, timestamp))
+    order_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+def update_order_payment(order_id, checkout_id=None, status=None):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    if checkout_id:
+        c.execute("UPDATE orders SET checkout_id=? WHERE id=?", (checkout_id, order_id))
+    if status:
+        c.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+    conn.commit()
+    conn.close()
+
+def get_order_by_id(order_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, phone, amount, status, checkout_id FROM orders WHERE id=?", (order_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"order_id": row[0], "phone": row[1], "amount": row[2], "status": row[3], "checkout_id": row[4]}
+    return None
+
+def get_customer_name(phone):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT name FROM customers WHERE phone=?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else f"Customer {phone[-4:]}"
 
 # ----------------------------
-# M-PESA Helper Functions
+# M-PESA Functions
 # ----------------------------
 def get_access_token():
     auth = base64.b64encode(f"{MPESA_CONSUMER_KEY}:{MPESA_CONSUMER_SECRET}".encode()).decode()
@@ -94,31 +162,20 @@ def send_whatsapp_message(to, body):
 # ----------------------------
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    global order_counter
     incoming_msg = request.form.get("Body", "").strip().lower()
     phone_number = request.form.get("From", "").replace("whatsapp:", "")
     customer_name = request.form.get("ProfileName", f"Customer {phone_number[-4:]}")
+    save_customer(phone_number, customer_name)
 
     resp = MessagingResponse()
     msg = resp.message()
-
-    # Initialize customer order storage
-    if phone_number not in orders:
-        orders[phone_number] = {"customer_name": customer_name, "orders": {}}
 
     # Handle "order <amount>"
     if incoming_msg.startswith("order"):
         try:
             amount = float(incoming_msg.split()[1])
-            current_order_id = order_counter
-            order_counter += 1
-            orders[phone_number]["orders"][current_order_id] = {
-                "order_id": current_order_id,
-                "amount": amount,
-                "status": "pending",
-                "checkout_id": None
-            }
-            msg.body(f"🧾 Order #{current_order_id}\nCustomer: {customer_name}\nAmount: KES {amount}\n\nReply: pay {current_order_id} to pay now.")
+            order_id = create_order(phone_number, amount)
+            msg.body(f"🧾 Order #{order_id}\nCustomer: {customer_name}\nAmount: KES {amount}\n\nReply: pay {order_id} to pay now.")
         except (IndexError, ValueError):
             msg.body("⚠️ Invalid command. Use: order <amount> (e.g., order 100)")
         return str(resp)
@@ -127,14 +184,14 @@ def whatsapp_webhook():
     elif incoming_msg.startswith("pay"):
         try:
             order_id = int(incoming_msg.split()[1])
-            if order_id not in orders[phone_number]["orders"]:
-                msg.body(f"❌ No order found with ID {order_id}. Please create an order first.")
+            order = get_order_by_id(order_id)
+            if not order or order["phone"] != phone_number:
+                msg.body(f"❌ No order found with ID {order_id}.")
             else:
-                order = orders[phone_number]["orders"][order_id]
                 try:
                     stk_resp = stk_push(phone_number=f"254{phone_number[-9:]}", amount=order["amount"])
-                    order["checkout_id"] = stk_resp.get("CheckoutRequestID")
-                    msg.body(f"📲 STK push sent!\n\nOrder #{order_id}\nAmount: KES {order['amount']}\nEnter your M-Pesa PIN to complete payment.")
+                    update_order_payment(order_id, checkout_id=stk_resp.get("CheckoutRequestID"))
+                    msg.body(f"📲 STK push sent!\nOrder #{order_id}\nAmount: KES {order['amount']}\nEnter your M-Pesa PIN to complete payment.")
                 except Exception as e:
                     msg.body(f"❌ Failed to initiate payment: {e}")
         except (IndexError, ValueError):
@@ -165,22 +222,27 @@ def mpesa_callback():
                     amount = item["Value"]
                 elif item["Name"] == "PhoneNumber":
                     phone = str(item["Value"])
-            # Find order and update
-            for p, cust in orders.items():
-                for oid, order in cust["orders"].items():
-                    if order["checkout_id"] == checkout_request_id:
-                        order["status"] = "paid"
-                        logging.info(f"Payment successful for {p}: amount {amount}")
-                        send_whatsapp_message(p, f"✅ PAYMENT RECEIVED\nOrder #{oid}\nAmount: KES {amount}\nReceipt: {result.get('CallbackMetadata', {}).get('Item', [{}])[0].get('Value', '')}\n\nThank you for paying with ChatPESA 🙏")
-                        break
+            # Update order in DB
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT id, phone, amount FROM orders WHERE checkout_id=?", (checkout_request_id,))
+            row = c.fetchone()
+            if row:
+                order_id = row[0]
+                update_order_payment(order_id, status="paid")
+                customer_name = get_customer_name(phone)
+                send_whatsapp_message(phone, f"✅ PAYMENT RECEIVED\nOrder #{order_id}\nAmount: KES {amount}\n\nThank you {customer_name} for paying with ChatPESA 🙏")
+            conn.close()
         else:
-            logging.warning(f"Payment failed for CheckoutRequestID: {checkout_request_id}")
-            # Notify user of failure
-            for p, cust in orders.items():
-                for oid, order in cust["orders"].items():
-                    if order["checkout_id"] == checkout_request_id:
-                        send_whatsapp_message(p, f"❌ Payment failed for Order #{oid}. Please try again.")
-                        break
+            # Payment failed
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT id, phone FROM orders WHERE checkout_id=?", (checkout_request_id,))
+            row = c.fetchone()
+            if row:
+                order_id, phone = row
+                send_whatsapp_message(phone, f"❌ Payment failed for Order #{order_id}. Please try again.")
+            conn.close()
     except Exception as e:
         logging.error(f"Error processing callback: {e}")
 
