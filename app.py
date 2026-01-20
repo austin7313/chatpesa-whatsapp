@@ -1,27 +1,37 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
 import pytz
 from datetime import datetime
 import os
 
 app = Flask(__name__)
+CORS(app)  # 🔥 CRITICAL: allow browser dashboard access
 
-# In-memory order storage (replace with DB for production)
 orders = []
 
 EAST_AFRICA = pytz.timezone("Africa/Nairobi")
 
 @app.route("/health", methods=["GET"])
 def health():
-    return "OK", 200
+    return jsonify({"status": "ok"}), 200
+
 
 @app.route("/orders", methods=["GET"])
 def get_orders():
     try:
-        return jsonify({"status": "ok", "orders": orders}), 200
+        return jsonify({
+            "status": "ok",
+            "orders": orders
+        }), 200
     except Exception as e:
-        print("Orders endpoint error:", e)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print("❌ /orders error:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "orders": []
+        }), 500
+
 
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -29,9 +39,9 @@ def whatsapp_webhook():
         incoming_msg = request.values.get("Body", "").strip()
         from_number = request.values.get("From", "")
 
-        # Record order
         now = datetime.now(EAST_AFRICA).isoformat()
-        receipt_number = f"RCP{len(orders)+1:04d}"
+        receipt_number = f"RCP{len(orders) + 1:04d}"
+
         order = {
             "id": receipt_number,
             "customer_phone": from_number,
@@ -42,19 +52,23 @@ def whatsapp_webhook():
             "receipt_number": receipt_number,
             "created_at": now
         }
+
         orders.append(order)
 
-        # Twilio response
         resp = MessagingResponse()
-        resp.message(f"✅ Received: '{incoming_msg}'. Receipt: {receipt_number}")
+        resp.message(
+            f"✅ Received: '{incoming_msg}'.\n"
+            f"Receipt: {receipt_number}\n"
+            f"Reply PAY to complete payment."
+        )
 
         return str(resp), 200
 
     except Exception as e:
-        print("Webhook Error:", e)
+        print("❌ Webhook error:", e)
         return str(e), 500
 
+
 if __name__ == "__main__":
-    # Bind to Render's dynamic PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
