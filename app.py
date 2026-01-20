@@ -1,82 +1,115 @@
+import os
+import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
+from datetime import datetime, timezone, timedelta
 import pytz
-from datetime import datetime
-import json
-import os
 
+# ========================
+# Configuration
+# ========================
+PORT = int(os.environ.get("PORT", 5000))
+EAT = pytz.timezone("Africa/Nairobi")
+
+# Orders storage (in-memory for now, can be replaced by DB)
+ORDERS = {}
+
+# ========================
+# Flask Setup
+# ========================
 app = Flask(__name__)
 CORS(app)
 
-# Persistent JSON storage
-ORDERS_FILE = "orders.json"
-if os.path.exists(ORDERS_FILE):
-    with open(ORDERS_FILE, "r") as f:
-        orders = json.load(f)
-else:
-    orders = []
-
-# Helper to save orders
-def save_orders():
-    with open(ORDERS_FILE, "w") as f:
-        json.dump(orders, f, indent=2)
-
+# ========================
+# Health Check
+# ========================
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"}), 200
 
+# ========================
+# Orders Endpoint
+# ========================
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"status": "ok", "orders": orders})
+    # Return all orders as a list
+    orders_list = list(ORDERS.values())
+    return jsonify({"status": "ok", "orders": orders_list}), 200
 
+# ========================
+# WhatsApp Webhook
+# ========================
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    data = request.form if request.form else request.json
-    from_number = data.get("From")
-    body = data.get("Body", "").strip()
+    data = request.json
+    phone = data.get("from")
+    message = data.get("message", "").strip()
 
-    # Parse name if user sends "Name: <name>"
-    if body.lower().startswith("name:"):
-        name = body[5:].strip()
-        reply_msg = f"Thanks {name}! You can now send your order."
-        resp = MessagingResponse()
-        resp.message(reply_msg)
-        return str(resp)
+    if not phone or not message:
+        return jsonify({"status": "error", "message": "Missing phone or message"}), 400
 
-    # Otherwise, treat as an order
-    order_id = f"RCP{len(orders)+1:04d}"
-    name = None
-    # Check if user already has a name stored
-    for o in orders:
-        if o["customer_phone"] == from_number and o.get("name"):
-            name = o["name"]
-            break
+    # Generate internal receipt number
+    receipt_number = f"RCP{len(ORDERS)+1:04d}"
 
-    order = {
-        "id": order_id,
-        "customer_phone": from_number,
-        "name": name,
-        "raw_message": body,
-        "items": f"Order from WhatsApp: {body}",
+    # Store order (initially awaiting payment)
+    ORDERS[receipt_number] = {
+        "id": receipt_number,
+        "customer_phone": phone,
+        "name": None,  # Will be filled when payment is confirmed
+        "items": f"Order from WhatsApp: {message}",
+        "raw_message": message,
         "amount": 0,
         "status": "awaiting_payment",
-        "receipt_number": order_id,
-        "created_at": datetime.utcnow().replace(tzinfo=pytz.UTC).isoformat()
+        "receipt_number": receipt_number,
+        "created_at": datetime.now(timezone.utc).isoformat()
     }
-    orders.append(order)
-    save_orders()
 
-    # Reply back
-    reply_text = f"Received your order! Receipt: {order_id}"
-    if name:
-        reply_text = f"Hi {name}, {reply_text}"
-    else:
-        reply_text = f"{reply_text} (Send 'Name: YourName' to personalize.)"
+    # Send auto-reply (simulate)
+    # In real deployment, call Twilio API here
+    reply = f"Thanks! Your order {receipt_number} is received. Awaiting payment."
+    print(f"Auto-reply to {phone}: {reply}")
 
-    resp = MessagingResponse()
-    resp.message(reply_text)
-    return str(resp)
+    return jsonify({"status": "ok", "receipt_number": receipt_number, "reply": reply}), 200
 
+# ========================
+# M-Pesa Payment Webhook
+# ========================
+@app.route("/webhook/mpesa", methods=["POST"])
+def mpesa_webhook():
+    data = request.json
+
+    try:
+        bill_ref = data.get("BillRefNumber")  # matches receipt_number
+        amount = float(data.get("TransAmount", 0))
+        phone = data.get("MSISDN")
+        first_name = data.get("FirstName", "")
+        middle_name = data.get("MiddleName", "")
+        last_name = data.get("LastName", "")
+
+        full_name = " ".join([first_name, middle_name, last_name]).strip() or None
+
+        if bill_ref not in ORDERS:
+            return jsonify({"status": "error", "message": "Unknown order"}), 404
+
+        # Update order
+        ORDERS[bill_ref].update({
+            "amount": amount,
+            "name": full_name,
+            "status": "paid",
+            "payment_phone": phone,
+            "paid_at": datetime.now(timezone.utc).isoformat()
+        })
+
+        # Optionally send WhatsApp confirmation (simulate)
+        print(f"Payment confirmed for {bill_ref}. Name: {full_name}, Amount: {amount}")
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ========================
+# Run Server
+# ========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=PORT)
