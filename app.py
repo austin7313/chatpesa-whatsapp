@@ -1,119 +1,57 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
-import pytz
+from flask_cors import CORS
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
+CORS(app)  # Allow dashboard requests
 
-# In-memory orders storage (replace with DB in production)
-orders = []
+# In-memory orders list (replace with your DB if needed)
+orders_list = []
 
-# Nairobi timezone
-EAT = pytz.timezone("Africa/Nairobi")
+# Example order structure
+# {
+#   "id": "RCP0001",
+#   "customer_phone": "whatsapp:+254722275271",
+#   "name": "Bryce",
+#   "items": "Order from WhatsApp: Order 1",
+#   "amount": 0,
+#   "status": "awaiting_payment",
+#   "receipt_number": "RCP0001",
+#   "created_at": datetime.utcnow().isoformat()
+# }
 
-
-# Utility: normalize phone numbers
-def normalize_phone(p):
-    if not p:
-        return None
-    p = str(p)
-    if p.startswith("+254"):
-        return "0" + p[4:]
-    if p.startswith("254"):
-        return "0" + p[3:]
-    return p
-
-
-# Health check
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"}), 200
 
-
-# Create new order (WhatsApp webhook simulation)
-@app.route("/webhook/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    data = request.json
-    from_number = data.get("From")
-    incoming_msg = data.get("Body", "").strip()
-
-    if not from_number or not incoming_msg:
-        return jsonify({"error": "Missing fields"}), 400
-
-    # Generate receipt / order id
-    receipt_number = f"RCP{len(orders)+1:04d}"
-
-    order = {
-        "id": receipt_number,
-        "customer_phone": from_number,
-        "items": f"Order from WhatsApp: {incoming_msg}",
-        "raw_message": incoming_msg,
-        "amount": 0,
-        "status": "awaiting_payment",
-        "receipt_number": receipt_number,
-        "mpesa_receipt": None,
-        "payer_name": None,  # NEW FIELD
-        "created_at": datetime.now(EAT).isoformat()
-    }
-
-    orders.append(order)
-    return jsonify({"status": "ok", "order": order}), 200
-
-
-# STK callback (Safaricom M-Pesa)
-@app.route("/webhook/stk", methods=["POST"])
-def stk_callback():
-    callback_data = request.json or {}
-
-    # Extract metadata safely
-    meta_items = callback_data.get("CallbackMetadata", {}).get("Item", [])
-    meta = {}
-    for item in meta_items:
-        name = item.get("Name")
-        value = item.get("Value")
-        if name:
-            meta[name] = value
-
-    receipt = meta.get("MpesaReceiptNumber")
-    phone = meta.get("PhoneNumber")
-    amount = meta.get("Amount", 0)
-
-    # Extract payer name
-    first = str(meta.get("FirstName", "") or "").strip()
-    middle = str(meta.get("MiddleName", "") or "").strip()
-    last = str(meta.get("LastName", "") or "").strip()
-    payer_name = " ".join([first, middle, last]).strip() or None
-
-    # Normalize phone for matching
-    callback_phone = normalize_phone(phone)
-
-    # Match oldest awaiting_payment order for this phone (FIFO)
-    matched_order = None
-    for order in orders:
-        if order["status"] != "awaiting_payment":
-            continue
-        order_phone = normalize_phone(order["customer_phone"].replace("whatsapp:", ""))
-        if order_phone == callback_phone:
-            matched_order = order
-            break
-
-    if matched_order:
-        matched_order["status"] = "paid"
-        matched_order["mpesa_receipt"] = receipt
-        matched_order["payer_name"] = payer_name
-        matched_order["amount"] = amount
-        print(f"✅ Payment matched: {matched_order['id']} | {payer_name} | {amount}")
-    else:
-        print(f"⚠️ Callback received but no matching order for {callback_phone}")
-
-    # Respond to Safaricom
-    return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
-
-
-# Fetch all orders (Dashboard)
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"status": "ok", "orders": orders}), 200
+    # Return orders sorted by created_at descending
+    sorted_orders = sorted(
+        orders_list, 
+        key=lambda o: o.get("created_at", ""), 
+        reverse=True
+    )
+    return jsonify({"orders": sorted_orders, "status": "ok"}), 200
 
+@app.route("/orders", methods=["POST"])
+def add_order():
+    data = request.json
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    order = {
+        "id": data.get("id") or f"RCP{len(orders_list)+1:04}",
+        "customer_phone": data.get("customer_phone"),
+        "name": data.get("name", "—"),  # Default to — if name missing
+        "items": data.get("items"),
+        "amount": data.get("amount", 0),
+        "status": data.get("status", "awaiting_payment"),
+        "receipt_number": data.get("receipt_number") or f"RCP{len(orders_list)+1:04}",
+        "created_at": datetime.utcnow().isoformat()
+    }
+    orders_list.append(order)
+    return jsonify({"order": order, "status": "ok"}), 201
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
