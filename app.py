@@ -1,60 +1,68 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
 import pytz
-from twilio.twiml.messaging_response import MessagingResponse  # ✅ Official Twilio library
+import uuid
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory orders (replace with DB in production)
-ORDERS = []
+# In-memory "database" for orders (replace with real DB later)
+orders = []
 
-# Health check
+# East Africa Timezone
+EAT = pytz.timezone("Africa/Nairobi")
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
 
-# Orders endpoint
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({
-        "orders": ORDERS,
-        "status": "ok"
-    }), 200
+    return jsonify({"orders": orders, "status": "ok"}), 200
 
-# Twilio webhook for WhatsApp
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    from_number = request.values.get("From", "")
-    body = request.values.get("Body", "")
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    try:
+        data = request.json
+        phone = data.get("from") or data.get("customer_phone") or "unknown"
+        amount = float(data.get("amount", 0))
+        items = data.get("items") or data.get("message") or "—"
+        status = data.get("status", "paid").lower()
+        
+        # Generate Order ID
+        order_id = len(orders) + 1
+        
+        # Generate Receipt Number
+        receipt_number = f"RCP{str(order_id).zfill(4)}"
+        
+        # Timestamp in East Africa Time
+        now_eat = datetime.now(EAT).isoformat()
+        
+        # Create order
+        order = {
+            "id": order_id,
+            "customer_phone": phone,
+            "amount": amount,
+            "items": items,
+            "status": status,
+            "receipt_number": receipt_number,
+            "created_at": now_eat
+        }
+        
+        orders.append(order)
+        
+        # Respond with success
+        return jsonify({
+            "status": "ok",
+            "order": order
+        }), 200
     
-    # Auto-generate order ID
-    order_id = f"ORD{len(ORDERS)+1:03d}"
-    
-    # Timestamp in EAT
-    eat = pytz.timezone("Africa/Nairobi")
-    now_eat = datetime.now(eat).isoformat()
-    
-    # Fake order creation
-    order = {
-        "id": order_id,
-        "customer_phone": from_number,
-        "items": body,
-        "amount": 10,  # You can calculate dynamically later
-        "status": "paid",
-        "receipt_number": f"RCP{len(ORDERS)+1:03d}",
-        "created_at": now_eat
-    }
-    ORDERS.append(order)
-    
-    print(f"Received message from {from_number}: {body}")
-    print(f"Order stored: {order}")
-    
-    # Proper TwiML response
-    resp = MessagingResponse()
-    resp.message("✅ Your order has been received!")
-    return Response(str(resp), mimetype="application/xml")  # ✅ Correct TwiML response
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Use port from Render environment
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
