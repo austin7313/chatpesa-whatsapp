@@ -1,91 +1,53 @@
-import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-from datetime import datetime
+from twilio.twiml.messaging_response import MessagingResponse
 import pytz
-from twilio.rest import Client
+from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
 
-# ===== Timezone setup =====
-EAT = pytz.timezone("Africa/Nairobi")
-
-# ===== In-memory orders storage =====
+# In-memory order storage for demonstration (replace with DB in production)
 orders = []
 
-# ===== Twilio config (set via environment variables) =====
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
+EAST_AFRICA = pytz.timezone("Africa/Nairobi")
 
-twilio_client = None
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-# ===== Utilities =====
-def generate_order_id():
-    return f"RCP{str(len(orders) + 1).zfill(4)}"
-
-def get_current_time_iso():
-    return datetime.now(EAT).isoformat()
-
-# ===== Health check =====
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return "OK", 200
 
-# ===== Get all orders =====
 @app.route("/orders", methods=["GET"])
 def get_orders():
     return jsonify({"status": "ok", "orders": orders}), 200
 
-# ===== Twilio WhatsApp webhook =====
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     try:
-        incoming = request.form.to_dict() or request.get_json() or {}
-        customer_phone = incoming.get("From") or incoming.get("from")
-        body = incoming.get("Body") or incoming.get("body") or ""
-        
-        if not customer_phone:
-            return jsonify({"error": "Missing customer phone"}), 400
+        incoming_msg = request.values.get("Body", "").strip()
+        from_number = request.values.get("From", "")
 
-        order_amount = 0
-        try:
-            order_amount = int(body.strip())
-        except:
-            pass
-
-        new_order = {
-            "id": generate_order_id(),
-            "customer_phone": customer_phone,
-            "items": f"Order from WhatsApp: {body.strip()}",
-            "amount": order_amount,
-            "status": "paid" if order_amount > 0 else "awaiting_payment",
-            "receipt_number": generate_order_id(),
-            "created_at": get_current_time_iso(),
-            "raw_message": body.strip()
+        # Record the order in your system
+        now = datetime.now(EAST_AFRICA).isoformat()
+        receipt_number = f"RCP{len(orders)+1:04d}"
+        order = {
+            "id": receipt_number,
+            "customer_phone": from_number,
+            "raw_message": incoming_msg,
+            "items": f"Order from WhatsApp: {incoming_msg}",
+            "amount": 0,
+            "status": "awaiting_payment",
+            "receipt_number": receipt_number,
+            "created_at": now
         }
-        orders.append(new_order)
+        orders.append(order)
 
-        # ===== Auto-reply via Twilio =====
-        if twilio_client:
-            try:
-                twilio_client.messages.create(
-                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                    to=customer_phone,
-                    body=f"✅ Your order {new_order['receipt_number']} has been received. Amount: KES {order_amount}"
-                )
-            except Exception as e:
-                print("Twilio send error:", e)
+        # Prepare Twilio reply
+        resp = MessagingResponse()
+        resp.message(f"✅ Received your message: '{incoming_msg}'. Your receipt: {receipt_number}")
 
-        return jsonify({"status": "ok", "order": new_order}), 200
+        return str(resp), 200
+
     except Exception as e:
-        print("Webhook error:", e)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print("Webhook Error:", e)
+        return str(e), 500
 
-# ===== Main =====
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=5000)
