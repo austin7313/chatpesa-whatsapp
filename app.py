@@ -2,16 +2,16 @@ import os
 import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timezone, timedelta
+from flask_socketio import SocketIO, emit
+from datetime import datetime, timezone
 import pytz
 
 # ========================
-# Configuration
+# Config
 # ========================
 PORT = int(os.environ.get("PORT", 5000))
 EAT = pytz.timezone("Africa/Nairobi")
 
-# Orders storage (in-memory for now, can be replaced by DB)
 ORDERS = {}
 
 # ========================
@@ -19,6 +19,7 @@ ORDERS = {}
 # ========================
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")  # WebSocket server
 
 # ========================
 # Health Check
@@ -32,9 +33,7 @@ def health():
 # ========================
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    # Return all orders as a list
-    orders_list = list(ORDERS.values())
-    return jsonify({"status": "ok", "orders": orders_list}), 200
+    return jsonify({"status": "ok", "orders": list(ORDERS.values())}), 200
 
 # ========================
 # WhatsApp Webhook
@@ -48,14 +47,11 @@ def whatsapp_webhook():
     if not phone or not message:
         return jsonify({"status": "error", "message": "Missing phone or message"}), 400
 
-    # Generate internal receipt number
     receipt_number = f"RCP{len(ORDERS)+1:04d}"
-
-    # Store order (initially awaiting payment)
-    ORDERS[receipt_number] = {
+    order = {
         "id": receipt_number,
         "customer_phone": phone,
-        "name": None,  # Will be filled when payment is confirmed
+        "name": None,
         "items": f"Order from WhatsApp: {message}",
         "raw_message": message,
         "amount": 0,
@@ -63,9 +59,12 @@ def whatsapp_webhook():
         "receipt_number": receipt_number,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
+    ORDERS[receipt_number] = order
 
-    # Send auto-reply (simulate)
-    # In real deployment, call Twilio API here
+    # Notify dashboard instantly
+    socketio.emit("new_order", order, broadcast=True)
+
+    # Simulated auto-reply
     reply = f"Thanks! Your order {receipt_number} is received. Awaiting payment."
     print(f"Auto-reply to {phone}: {reply}")
 
@@ -77,16 +76,11 @@ def whatsapp_webhook():
 @app.route("/webhook/mpesa", methods=["POST"])
 def mpesa_webhook():
     data = request.json
-
     try:
-        bill_ref = data.get("BillRefNumber")  # matches receipt_number
+        bill_ref = data.get("BillRefNumber")
         amount = float(data.get("TransAmount", 0))
         phone = data.get("MSISDN")
-        first_name = data.get("FirstName", "")
-        middle_name = data.get("MiddleName", "")
-        last_name = data.get("LastName", "")
-
-        full_name = " ".join([first_name, middle_name, last_name]).strip() or None
+        full_name = " ".join(filter(None, [data.get("FirstName"), data.get("MiddleName"), data.get("LastName")])) or None
 
         if bill_ref not in ORDERS:
             return jsonify({"status": "error", "message": "Unknown order"}), 404
@@ -100,11 +94,11 @@ def mpesa_webhook():
             "paid_at": datetime.now(timezone.utc).isoformat()
         })
 
-        # Optionally send WhatsApp confirmation (simulate)
+        # Notify dashboard instantly
+        socketio.emit("payment_update", ORDERS[bill_ref], broadcast=True)
         print(f"Payment confirmed for {bill_ref}. Name: {full_name}, Amount: {amount}")
 
         return jsonify({"status": "ok"}), 200
-
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -112,4 +106,4 @@ def mpesa_webhook():
 # Run Server
 # ========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    socketio.run(app, host="0.0.0.0", port=PORT)
