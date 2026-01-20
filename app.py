@@ -1,57 +1,73 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+import pytz
+import uuid
 
 app = Flask(__name__)
-CORS(app)  # Allow dashboard requests
+CORS(app)
 
-# In-memory orders list (replace with your DB if needed)
-orders_list = []
+# In-memory order storage (replace with DB later)
+orders = []
 
-# Example order structure
-# {
-#   "id": "RCP0001",
-#   "customer_phone": "whatsapp:+254722275271",
-#   "name": "Bryce",
-#   "items": "Order from WhatsApp: Order 1",
-#   "amount": 0,
-#   "status": "awaiting_payment",
-#   "receipt_number": "RCP0001",
-#   "created_at": datetime.utcnow().isoformat()
-# }
+# Helper: Format timestamp to EAT
+def now_eat_iso():
+    return datetime.now(pytz.timezone("Africa/Nairobi")).isoformat()
 
-@app.route("/health")
+# Webhook endpoint for Twilio WhatsApp
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    data = request.form or request.json
+    if not data:
+        return jsonify({"status": "error", "message": "No data received"}), 400
+
+    phone = data.get("From") or data.get("from")  # Twilio sends 'From'
+    body = data.get("Body") or data.get("body") or ""
+    name = data.get("ProfileName") or "Unknown"       # Twilio optional field
+
+    # Generate receipt/order ID
+    receipt_number = f"RCP{str(uuid.uuid4())[:8].upper()}"
+
+    # Save order
+    order = {
+        "id": receipt_number,
+        "customer_phone": phone,
+        "name": name,
+        "items": f"Order from WhatsApp: {body}",
+        "raw_message": body,
+        "amount": 0,
+        "status": "awaiting_payment",
+        "receipt_number": receipt_number,
+        "created_at": now_eat_iso()
+    }
+    orders.append(order)
+
+    # Immediate Twilio reply (empty message avoids 11200 errors)
+    twilio_reply = f"Hi {name}, we received your order '{body}'. Your receipt number is {receipt_number}."
+    
+    response_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{twilio_reply}</Message>
+</Response>"""
+    
+    return response_xml, 200, {"Content-Type": "text/xml"}
+
+# Orders endpoint for dashboard
+@app.route("/orders", methods=["GET"])
+def get_orders():
+    return jsonify({"orders": orders, "status": "ok"})
+
+# Health endpoint for dashboard status
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
 
-@app.route("/orders", methods=["GET"])
-def get_orders():
-    # Return orders sorted by created_at descending
-    sorted_orders = sorted(
-        orders_list, 
-        key=lambda o: o.get("created_at", ""), 
-        reverse=True
-    )
-    return jsonify({"orders": sorted_orders, "status": "ok"}), 200
-
-@app.route("/orders", methods=["POST"])
-def add_order():
-    data = request.json
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    order = {
-        "id": data.get("id") or f"RCP{len(orders_list)+1:04}",
-        "customer_phone": data.get("customer_phone"),
-        "name": data.get("name", "—"),  # Default to — if name missing
-        "items": data.get("items"),
-        "amount": data.get("amount", 0),
-        "status": data.get("status", "awaiting_payment"),
-        "receipt_number": data.get("receipt_number") or f"RCP{len(orders_list)+1:04}",
-        "created_at": datetime.utcnow().isoformat()
-    }
-    orders_list.append(order)
-    return jsonify({"order": order, "status": "ok"}), 201
+# Optional: Reset orders (for testing)
+@app.route("/reset_orders", methods=["POST"])
+def reset_orders():
+    global orders
+    orders = []
+    return jsonify({"status": "ok", "message": "Orders reset"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
