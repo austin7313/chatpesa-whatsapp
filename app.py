@@ -1,64 +1,61 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
-from datetime import datetime, timezone, timedelta
-import uuid
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for dashboard
+CORS(app)  # ✅ Allow React frontend to fetch
 
-# In-memory "database" (for demo purposes)
-orders_db = []
-
-# Helper to get East Africa Time
-def now_eat():
-    return datetime.now(timezone.utc) + timedelta(hours=3)
+# In-memory orders store (replace with DB later)
+ORDERS = []
 
 # Health check
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"}), 200
 
-# Get all orders
+# Orders endpoint
 @app.route("/orders", methods=["GET"])
 def get_orders():
     return jsonify({
-        "orders": orders_db,
+        "orders": ORDERS,
         "status": "ok"
-    })
+    }), 200
 
-# Create order helper
-def create_order(customer_phone, amount):
-    order_id = f"ORD{len(orders_db)+1:04d}"
-    timestamp = now_eat().isoformat()
+# Twilio webhook
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    from_number = request.values.get("From", "")
+    body = request.values.get("Body", "")
+    
+    # Generate a simple order ID
+    order_id = f"ORD{len(ORDERS)+1:03d}"
+    
+    # Capture timestamp in EAT (UTC+3)
+    eat = pytz.timezone("Africa/Nairobi")
+    now_eat = datetime.now(eat).isoformat()
+    
+    # Fake order creation
     order = {
         "id": order_id,
-        "customer_phone": customer_phone,
-        "amount": amount,
+        "customer_phone": from_number,
+        "items": body,
+        "amount": 10,  # replace with dynamic logic later
         "status": "paid",
-        "receipt_number": f"RCP{len(orders_db)+1:04d}",
-        "created_at": timestamp
+        "receipt_number": f"RCP{len(ORDERS)+1:03d}",
+        "created_at": now_eat
     }
-    return order
+    
+    ORDERS.append(order)
+    
+    # Log for debugging
+    print(f"Received WhatsApp message from {from_number}: {body}")
+    print(f"Order stored: {order}")
+    
+    # Respond to Twilio immediately with empty TwiML
+    twiml_response = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+    return twiml_response, 200, {'Content-Type': 'application/xml'}
 
-# Twilio webhook for WhatsApp messages
-@app.route("/webhook", methods=["POST"])
-def whatsapp_webhook():
-    incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From", "").strip()
-    
-    resp = MessagingResponse()
-    
-    # Simple demo: if message is a number, create order
-    if incoming_msg.isdigit():
-        amount = int(incoming_msg)
-        order = create_order(customer_phone=from_number, amount=amount)
-        orders_db.append(order)
-        resp.message(f"✅ Order received! Amount: KES {amount}, Order ID: {order['id']}")
-    else:
-        resp.message("Welcome to ChatPesa! Send an amount in KES to place an order.")
-    
-    return str(resp)
-
+# Run server
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True)
