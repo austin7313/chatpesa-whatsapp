@@ -1,101 +1,62 @@
-from flask import Flask, request, jsonify
+# app.py — Full Replacement for ChatPesa Dashboard
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
-import datetime
+from datetime import datetime
+import uuid
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory store for now (we’ll move to DB later)
-ORDERS = []
+# In-memory orders database (replace with real DB later)
+orders_db = []
 
+# Utility: generate a new order
+def create_order(customer_phone, amount, status="paid", receipt_number=None, items=None):
+    order_id = str(uuid.uuid4())[:8]  # short unique ID
+    timestamp = datetime.utcnow().isoformat()  # UTC timestamp
+    return {
+        "id": order_id,
+        "customer_phone": customer_phone,
+        "amount": amount,
+        "status": status,
+        "receipt_number": receipt_number or f"RCP{len(orders_db)+1:04d}",
+        "items": items or "Item description",
+        "created_at": timestamp
+    }
+
+# Health endpoint
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"})
 
-
+# Orders endpoint
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({
-        "status": "ok",
-        "orders": ORDERS
-    }), 200
+    return jsonify({"orders": orders_db, "status": "ok"})
 
+# Create order endpoint (for testing or webhook)
+@app.route("/create_order", methods=["POST"])
+def add_order():
+    data = request.get_json()
+    if not data or "customer_phone" not in data or "amount" not in data:
+        return jsonify({"error": "Missing customer_phone or amount"}), 400
+    
+    order = create_order(
+        customer_phone=data["customer_phone"],
+        amount=data["amount"],
+        status=data.get("status", "paid"),
+        receipt_number=data.get("receipt_number"),
+        items=data.get("items")
+    )
+    orders_db.append(order)
+    return jsonify({"message": "Order created", "order": order}), 201
 
-@app.route("/webhook/whatsapp", methods=["GET", "POST"])
-def whatsapp_webhook():
-    try:
-        print("🔥 WHATSAPP WEBHOOK HIT 🔥")
-
-        # Allow browser test
-        if request.method == "GET":
-            return "Webhook is alive", 200
-
-        data = request.form.to_dict()
-        print("📩 Incoming form data:", data)
-
-        from_number = data.get("From", "")
-        body = data.get("Body", "").strip().lower()
-
-        resp = MessagingResponse()
-        msg = resp.message()
-
-        # Basic command parsing
-        if body.startswith("order"):
-            parts = body.split()
-
-            if len(parts) == 2 and parts[1].isdigit():
-                amount = int(parts[1])
-
-                order_id = len(ORDERS) + 1
-                timestamp = datetime.datetime.utcnow().isoformat()
-
-                order = {
-                    "order_id": order_id,
-                    "phone": from_number,
-                    "amount": amount,
-                    "status": "PENDING",
-                    "receipt": None,
-                    "time": timestamp
-                }
-
-                ORDERS.append(order)
-
-                msg.body(
-                    f"✅ Order #{order_id} received for KES {amount}.\n"
-                    f"Reply PAY to complete payment."
-                )
-
-            else:
-                msg.body("❌ Invalid format.\nUse: order 100")
-
-        elif body == "pay":
-            if len(ORDERS) == 0:
-                msg.body("❌ No active order found. Send: order 100")
-            else:
-                last_order = ORDERS[-1]
-                last_order["status"] = "PAID"
-                last_order["receipt"] = f"RCP{last_order['order_id']:04d}"
-
-                msg.body(
-                    f"💳 Payment received!\n"
-                    f"Order #{last_order['order_id']}\n"
-                    f"Receipt: {last_order['receipt']}"
-                )
-
-        else:
-            msg.body(
-                "👋 Welcome to ChatPesa\n\n"
-                "Send: order 100\n"
-                "Then reply: PAY"
-            )
-
-        return str(resp), 200
-
-    except Exception as e:
-        print("❌ WEBHOOK ERROR:", str(e))
-        return "Internal Server Error", 500
-
+# Optional: reset orders (testing)
+@app.route("/reset_orders", methods=["POST"])
+def reset_orders():
+    orders_db.clear()
+    return jsonify({"message": "Orders cleared"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
