@@ -1,62 +1,64 @@
-# app.py — Full Replacement for ChatPesa Dashboard
-
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime
+from twilio.twiml.messaging_response import MessagingResponse
+from datetime import datetime, timezone, timedelta
 import uuid
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for dashboard
 
-# In-memory orders database (replace with real DB later)
+# In-memory "database" (for demo purposes)
 orders_db = []
 
-# Utility: generate a new order
-def create_order(customer_phone, amount, status="paid", receipt_number=None, items=None):
-    order_id = str(uuid.uuid4())[:8]  # short unique ID
-    timestamp = datetime.utcnow().isoformat()  # UTC timestamp
-    return {
-        "id": order_id,
-        "customer_phone": customer_phone,
-        "amount": amount,
-        "status": status,
-        "receipt_number": receipt_number or f"RCP{len(orders_db)+1:04d}",
-        "items": items or "Item description",
-        "created_at": timestamp
-    }
+# Helper to get East Africa Time
+def now_eat():
+    return datetime.now(timezone.utc) + timedelta(hours=3)
 
-# Health endpoint
+# Health check
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
-# Orders endpoint
+# Get all orders
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"orders": orders_db, "status": "ok"})
+    return jsonify({
+        "orders": orders_db,
+        "status": "ok"
+    })
 
-# Create order endpoint (for testing or webhook)
-@app.route("/create_order", methods=["POST"])
-def add_order():
-    data = request.get_json()
-    if not data or "customer_phone" not in data or "amount" not in data:
-        return jsonify({"error": "Missing customer_phone or amount"}), 400
+# Create order helper
+def create_order(customer_phone, amount):
+    order_id = f"ORD{len(orders_db)+1:04d}"
+    timestamp = now_eat().isoformat()
+    order = {
+        "id": order_id,
+        "customer_phone": customer_phone,
+        "amount": amount,
+        "status": "paid",
+        "receipt_number": f"RCP{len(orders_db)+1:04d}",
+        "created_at": timestamp
+    }
+    return order
+
+# Twilio webhook for WhatsApp messages
+@app.route("/webhook", methods=["POST"])
+def whatsapp_webhook():
+    incoming_msg = request.values.get("Body", "").strip()
+    from_number = request.values.get("From", "").strip()
     
-    order = create_order(
-        customer_phone=data["customer_phone"],
-        amount=data["amount"],
-        status=data.get("status", "paid"),
-        receipt_number=data.get("receipt_number"),
-        items=data.get("items")
-    )
-    orders_db.append(order)
-    return jsonify({"message": "Order created", "order": order}), 201
-
-# Optional: reset orders (testing)
-@app.route("/reset_orders", methods=["POST"])
-def reset_orders():
-    orders_db.clear()
-    return jsonify({"message": "Orders cleared"}), 200
+    resp = MessagingResponse()
+    
+    # Simple demo: if message is a number, create order
+    if incoming_msg.isdigit():
+        amount = int(incoming_msg)
+        order = create_order(customer_phone=from_number, amount=amount)
+        orders_db.append(order)
+        resp.message(f"✅ Order received! Amount: KES {amount}, Order ID: {order['id']}")
+    else:
+        resp.message("Welcome to ChatPesa! Send an amount in KES to place an order.")
+    
+    return str(resp)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
