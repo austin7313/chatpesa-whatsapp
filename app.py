@@ -1,52 +1,56 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from flask_socketio import SocketIO
-import pytz
 from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# In-memory orders storage (replace with DB for production)
+# In-memory orders store (for testing, can later connect to DB)
 orders = []
 
-# API: health check
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
-
-# API: get all orders
+# Endpoint to get all orders
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"status": "ok", "orders": orders}), 200
+    return jsonify({
+        "status": "ok",
+        "orders": orders
+    })
 
-# API: create new order (from WhatsApp/M-Pesa)
+# Endpoint to create new order (from WhatsApp / MPesa webhook)
 @app.route("/orders", methods=["POST"])
 def create_order():
-    data = request.json
-    order_id = f"RCP{len(orders)+1:04d}"
+    data = request.json or {}
 
-    # Extract MPESA name if exists
-    customer_name = data.get("mpesa_name") or data.get("name") or "—"
+    orderId = f"RCP{len(orders)+1:04d}"
+    customerPhone = data.get("customerPhone") or "—"
+    name = data.get("mpesaName") or data.get("name") or "—"
+    items = data.get("items") or f"Order from WhatsApp: {orderId}"
+    amount = data.get("amount") or "—"
+    status = data.get("status") or "AWAITING_PAYMENT"
+    receipt = orderId
+    createdAt = datetime.now(pytz.timezone("Africa/Nairobi")).strftime("%d/%m/%Y, %H:%M")
 
     order = {
-        "order_id": order_id,
-        "customer_phone": data.get("phone", "—"),
-        "name": customer_name,
-        "items": data.get("items", "—"),
-        "amount": data.get("amount", "—"),
-        "status": data.get("status", "AWAITING_PAYMENT"),
-        "receipt": order_id,
-        "created_at": datetime.now(pytz.timezone("Africa/Nairobi")).strftime("%d/%m/%Y, %H:%M")
+        "orderId": orderId,
+        "customerPhone": customerPhone,
+        "mpesaName": data.get("mpesaName"),
+        "name": name,
+        "items": items,
+        "amount": amount,
+        "status": status,
+        "receipt": receipt,
+        "createdAt": createdAt
     }
 
     orders.append(order)
-
-    # Notify dashboard via WebSocket
-    socketio.emit("new_order", order)
     return jsonify({"status": "ok", "order": order}), 201
 
-# Run app
+# Health check
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000)
