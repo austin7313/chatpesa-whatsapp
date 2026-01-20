@@ -1,73 +1,52 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
-from datetime import datetime
 import pytz
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# In-memory storage for simplicity
-ORDERS = []
+# In-memory orders storage (replace with DB for production)
+orders = []
 
-# Health check
-@app.route("/health")
+# API: health check
+@app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"}), 200
 
-# Get orders
-@app.route("/orders")
+# API: get all orders
+@app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"status": "ok", "orders": ORDERS})
+    return jsonify({"status": "ok", "orders": orders}), 200
 
-# Receive WhatsApp / M-Pesa messages
-@app.route("/new_order", methods=["POST"])
-def new_order():
+# API: create new order (from WhatsApp/M-Pesa)
+@app.route("/orders", methods=["POST"])
+def create_order():
     data = request.json
-    # Extract fields safely
-    customer_phone = data.get("customer_phone")
-    raw_message = data.get("raw_message")
-    receipt_number = data.get("receipt_number")
-    amount = data.get("amount", 0)
-    name = data.get("name") or "—"  # This can later be fetched from M-Pesa callback
+    order_id = f"RCP{len(orders)+1:04d}"
 
-    order_id = f"RCP{len(ORDERS)+1:04d}"
-    created_at = datetime.now(pytz.timezone("Africa/Nairobi")).isoformat()
+    # Extract MPESA name if exists
+    customer_name = data.get("mpesa_name") or data.get("name") or "—"
 
     order = {
-        "id": order_id,
-        "customer_phone": customer_phone,
-        "name": name,
-        "items": raw_message,
-        "amount": amount,
-        "status": "awaiting_payment",
-        "receipt_number": receipt_number,
-        "created_at": created_at
+        "order_id": order_id,
+        "customer_phone": data.get("phone", "—"),
+        "name": customer_name,
+        "items": data.get("items", "—"),
+        "amount": data.get("amount", "—"),
+        "status": data.get("status", "AWAITING_PAYMENT"),
+        "receipt": order_id,
+        "created_at": datetime.now(pytz.timezone("Africa/Nairobi")).strftime("%d/%m/%Y, %H:%M")
     }
-    ORDERS.append(order)
 
-    # Emit to dashboard in real-time
+    orders.append(order)
+
+    # Notify dashboard via WebSocket
     socketio.emit("new_order", order)
+    return jsonify({"status": "ok", "order": order}), 201
 
-    return jsonify({"status": "ok", "order": order})
-
-# Update order payment (from M-Pesa callback)
-@app.route("/update_payment", methods=["POST"])
-def update_payment():
-    receipt_number = request.json.get("receipt_number")
-    mpesa_name = request.json.get("name")  # Payer name from M-Pesa
-    amount = request.json.get("amount", 0)
-
-    for order in ORDERS:
-        if order["receipt_number"] == receipt_number:
-            order["status"] = "paid"
-            order["name"] = mpesa_name
-            order["amount"] = amount
-            socketio.emit("update_order", order)
-            return jsonify({"status": "ok", "order": order})
-
-    return jsonify({"status": "not_found"}), 404
-
+# Run app
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000)
