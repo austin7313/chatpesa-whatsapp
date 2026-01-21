@@ -1,63 +1,119 @@
-from flask import Flask, request, jsonify
-from datetime import datetime
+import React, { useEffect, useState } from "react";
+import "./App.css"; // optional: your custom CSS
 
-app = Flask(__name__)
+function App() {
+  const [orders, setOrders] = useState([]);
+  const [apiStatus, setApiStatus] = useState(false); // true = online
+  const [loading, setLoading] = useState(true);
 
-# Simulated in-memory orders (replace with your DB)
-ORDERS_DB = {}
+  const fetchOrders = async () => {
+    try {
+      const res = await fetch("https://chatpesa-whatsapp.onrender.com/orders");
+      const data = await res.json();
 
-# Sample order creation for reference
-# ORDERS_DB["ORD9219"] = {
-#     "id": "ORD9219",
-#     "customer_name": "Wyckyaustin",
-#     "customer_phone": "0722xxxxxx",
-#     "items": "Custom Order",
-#     "amount": 1000,
-#     "status": "AWAITING_PAYMENT",
-#     "created_at": datetime.utcnow().isoformat()
-# }
+      if (data.status === "ok") {
+        setOrders(data.orders || []);
+        setApiStatus(true);
+      } else {
+        setOrders([]);
+        setApiStatus(false);
+      }
+    } catch (err) {
+      console.error("Failed to fetch orders:", err);
+      setOrders([]);
+      setApiStatus(false);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-@app.route("/mpesa/callback", methods=["POST"])
-def mpesa_callback():
-    """
-    Receive payment confirmation from M-Pesa Daraja (production)
-    """
-    try:
-        data = request.json
-        print(f"📤 M-Pesa Callback Received: {data}")
+  useEffect(() => {
+    fetchOrders(); // initial load
+    const interval = setInterval(fetchOrders, 5000); // refresh every 5 sec
+    return () => clearInterval(interval);
+  }, []);
 
-        # Extract relevant fields (adjust according to your Daraja setup)
-        trans_id = data.get("TransactionID")
-        amount = float(data.get("Amount", 0))
-        order_id = data.get("BillRefNumber")  # your Order ID
-        first_name = data.get("FirstName", "")
-        middle_name = data.get("MiddleName", "")
-        last_name = data.get("LastName", "")
+  return (
+    <div style={{ fontFamily: "Arial, sans-serif", padding: "20px" }}>
+      <h1>💳 ChatPesa Dashboard</h1>
 
-        customer_name = " ".join([first_name, middle_name, last_name]).strip()
+      {/* API Status */}
+      <div style={{ marginBottom: "20px" }}>
+        Status:{" "}
+        <span
+          style={{
+            color: "white",
+            padding: "5px 10px",
+            borderRadius: "5px",
+            backgroundColor: apiStatus ? "green" : "red",
+          }}
+        >
+          {apiStatus ? "ONLINE" : "OFFLINE"}
+        </span>
+      </div>
 
-        # Validate order exists
-        order = ORDERS_DB.get(order_id)
-        if not order:
-            print(f"❌ Unknown order: {order_id}")
-            return jsonify({"status": "error", "message": "Order not found"}), 404
+      {loading ? (
+        <p>Loading orders...</p>
+      ) : orders.length === 0 ? (
+        <p>No orders yet.</p>
+      ) : (
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+          }}
+        >
+          <thead>
+            <tr style={{ backgroundColor: "#f0f0f0" }}>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Order ID
+              </th>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Name
+              </th>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Items
+              </th>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Amount (KES)
+              </th>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Status
+              </th>
+              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
+                Time
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((order) => (
+              <tr key={order.id}>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  {order.id || "—"}
+                </td>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  {order.customer_name || "—"}
+                </td>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  {order.items || "—"}
+                </td>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  KES {order.amount?.toLocaleString() || 0}
+                </td>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  {order.status || "AWAITING_PAYMENT"}
+                </td>
+                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
+                  {new Date(order.created_at).toLocaleString() || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
 
-        # Validate amount
-        if amount != order["amount"]:
-            print(f"❌ Amount mismatch: {amount} != {order['amount']}")
-            return jsonify({"status": "error", "message": "Amount mismatch"}), 400
-
-        # Update order
-        order["status"] = "PAID"
-        order["customer_name"] = customer_name
-        order["paid_at"] = datetime.utcnow().isoformat()
-        order["transaction_id"] = trans_id
-
-        print(f"✅ Order {order_id} marked PAID, customer: {customer_name}")
-
-        # Return 200 to M-Pesa (always!)
-        return jsonify({"status": "success"}), 200
-
-    except Exception as e:
-        print(f"❌ Callback processing error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+export default App;
