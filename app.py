@@ -18,7 +18,7 @@ MPESA = {
     "passkey": "5a64ad290753ed331b662cf6d83d3149367867c102f964f522390ccbd85cb282",
     "consumer_key": "B05zln19QXC3OBL6YuCkdhZ8zvYqZtXP",
     "consumer_secret": "MYRasd2p9gGFcuCR",
-    "env": "sandbox",  # change to "production" when live
+    "env": "sandbox",  # switch to "production" when live
 }
 ORDERS = []
 
@@ -76,7 +76,6 @@ def whatsapp_webhook():
     }
     ORDERS.append(order_data)
 
-    # Twilio WhatsApp reply
     resp = MessagingResponse()
     payment_message = f"""✅ Order received from {RESTAURANT['name']}!
 📋 Your Order: {order_details['items']}
@@ -93,17 +92,20 @@ Reply DONE when paid. Order ID: {order_id}"""
 def stk_push():
     data = request.json
     order_id = data.get("order_id")
-    phone = data.get("phone")  # format 2547XXXXXXXX
+    phone = data.get("phone")
     order = next((o for o in ORDERS if o["id"]==order_id), None)
     if not order:
         return jsonify({"status": "error", "msg": "Order not found"}), 404
 
     token = get_mpesa_token()
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    password = base64.b64encode(f"{MPESA['shortcode']}{MPESA['passkey']}{timestamp}".encode()).decode()
+
     url = f"https://{ 'sandbox.safaricom.co.ke' if MPESA['env']=='sandbox' else 'api.safaricom.co.ke' }/mpesa/stkpush/v1/processrequest"
     payload = {
         "BusinessShortCode": MPESA["shortcode"],
-        "Password": base64.b64encode(f"{MPESA['shortcode']}{MPESA['passkey']}{datetime.utcnow().strftime('%Y%m%d%H%M%S')}".encode()).decode(),
-        "Timestamp": datetime.utcnow().strftime("%Y%m%d%H%M%S"),
+        "Password": password,
+        "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
         "Amount": order["amount"],
         "PartyA": phone,
@@ -122,18 +124,20 @@ def stk_push():
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
     data = request.json
-    # extract M-Pesa callback info
     try:
         stk_result = data["Body"]["stkCallback"]
-        order_id = stk_result["CheckoutRequestID"]
+        checkout_id = stk_result["CheckoutRequestID"]
         result_code = stk_result["ResultCode"]
-        if result_code == 0:
-            # Payment successful
-            item = ORDERS[-1]  # you may match via order_id in production
+
+        order = next((o for o in ORDERS if o["payment_code"]==checkout_id), None)
+        if order and result_code == 0:
+            item = order
             item["status"] = "PAID"
             item["mpesa_time"] = datetime.utcnow().isoformat()
-            item["mpesa_name"] = stk_result["CallbackMetadata"]["Item"][1]["Value"]  # customer's name
-            item["mpesa_phone"] = stk_result["CallbackMetadata"]["Item"][0]["Value"]
+            items_meta = stk_result.get("CallbackMetadata", {}).get("Item", [])
+            if items_meta:
+                item["mpesa_phone"] = items_meta[0]["Value"]
+                item["mpesa_name"] = items_meta[1]["Value"]
     except Exception as e:
         print("MPESA CALLBACK ERROR:", e)
     return jsonify({"status": "ok"}), 200
