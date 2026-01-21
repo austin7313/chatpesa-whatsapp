@@ -2,64 +2,56 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
 from datetime import datetime
+import random
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory store (safe for now)
-orders = []
+# ======================
+# IN-MEMORY STORE (SAFE FOR NOW)
+# ======================
+ORDERS = []
 
-# ===============================
+def generate_order_id():
+    return f"RCP{random.randint(1000,9999)}"
+
+# ======================
 # HEALTH CHECK
-# ===============================
-@app.route("/health")
+# ======================
+@app.route("/health", methods=["GET"])
 def health():
     return {"status": "ok"}
 
-# ===============================
-# DASHBOARD ORDERS API
-# ===============================
-@app.route("/orders")
-def get_orders():
-    return {
-        "status": "ok",
-        "orders": orders
-    }
-
-# ===============================
+# ======================
 # WHATSAPP WEBHOOK (CRITICAL)
-# ===============================
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp():
+# ======================
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp_webhook():
     try:
-        from_number = request.form.get("From", "").replace("whatsapp:", "")
         body = request.form.get("Body", "").strip()
+        from_number = request.form.get("From", "")
+        profile_name = request.form.get("ProfileName", "Customer")
 
-        order_id = f"RCP{len(orders) + 1001}"
-        amount = 1000  # static for now
+        order_id = generate_order_id()
 
         order = {
             "id": order_id,
+            "customer_name": profile_name,
             "customer_phone": from_number,
-            "customer_name": from_number,  # replaced after M-Pesa
             "items": body if body else "Custom Order",
-            "amount": amount,
+            "amount": 1000,
             "status": "AWAITING_PAYMENT",
-            "created_at": datetime.now().isoformat(),
-            "paid_at": None,
-            "mpesa_name": None,
-            "mpesa_receipt": None
+            "created_at": datetime.utcnow().isoformat()
         }
 
-        orders.insert(0, order)
+        ORDERS.append(order)
 
         resp = MessagingResponse()
         resp.message(
             f"Order received.\n\n"
             f"Order ID: {order_id}\n"
-            f"Amount: KES {amount}\n\n"
-            f"Pay via M-Pesa:\n"
-            f"Reference: {order_id}\n\n"
+            f"Amount: KES 1000\n\n"
+            f"Pay via M-Pesa.\n"
             f"Reply DONE after payment."
         )
 
@@ -67,38 +59,15 @@ def whatsapp():
 
     except Exception as e:
         resp = MessagingResponse()
-        resp.message("Sorry, something went wrong. Please try again.")
+        resp.message("System error. Please try again.")
         return str(resp), 200, {"Content-Type": "text/xml"}
 
-# ===============================
-# MPESA CALLBACK (READY)
-# ===============================
-@app.route("/mpesa/callback", methods=["POST"])
-def mpesa_callback():
-    data = request.json
-
-    try:
-        callback = data["Body"]["stkCallback"]
-        if callback["ResultCode"] != 0:
-            return jsonify({"status": "failed"})
-
-        meta = callback["CallbackMetadata"]["Item"]
-
-        receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
-        phone = next(i["Value"] for i in meta if i["Name"] == "PhoneNumber")
-        name = next(i["Value"] for i in meta if i["Name"] == "PayerName")
-
-        # Match latest unpaid order by phone
-        for order in orders:
-            if order["customer_phone"].endswith(str(phone)[-9:]) and order["status"] == "AWAITING_PAYMENT":
-                order["status"] = "PAID"
-                order["mpesa_name"] = name
-                order["customer_name"] = name
-                order["mpesa_receipt"] = receipt
-                order["paid_at"] = datetime.now().isoformat()
-                break
-
-        return jsonify({"status": "ok"})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# ======================
+# DASHBOARD ORDERS API
+# ======================
+@app.route("/orders", methods=["GET"])
+def get_orders():
+    return jsonify({
+        "status": "ok",
+        "orders": ORDERS
+    })
