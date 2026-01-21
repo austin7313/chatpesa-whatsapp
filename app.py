@@ -1,11 +1,15 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
 from datetime import datetime
 import random
 
 app = Flask(__name__)
+CORS(app)
 
-# In-memory storage (SAFE for now)
+# --------------------
+# IN-MEMORY STORE
+# --------------------
 ORDERS = []
 
 RESTAURANT = {
@@ -14,9 +18,9 @@ RESTAURANT = {
 }
 
 def generate_order_id():
-    return f"ORD{random.randint(100000, 999999)}"
+    return f"RCP{random.randint(1000, 9999)}"
 
-def parse_order_message(message):
+def parse_order(message):
     msg = message.lower()
     items = []
     amount = 0
@@ -32,63 +36,67 @@ def parse_order_message(message):
         amount += 800
 
     if not items:
-        items = ["Custom Order"]
+        items.append("Custom Order")
         amount = 1000
 
     return " + ".join(items), amount
 
 
+# --------------------
+# WHATSAPP WEBHOOK
+# --------------------
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
+    incoming_msg = request.form.get("Body", "")
+    from_number = request.form.get("From", "")
+    profile_name = request.form.get("ProfileName", "Customer")
+
+    items, amount = parse_order(incoming_msg)
+    order_id = generate_order_id()
+
+    order = {
+        "id": order_id,
+        "customer": profile_name,
+        "phone": from_number,
+        "items": items,
+        "amount": amount,
+        "status": "AWAITING_PAYMENT",
+        "created_at": datetime.utcnow().isoformat()
+    }
+
+    ORDERS.insert(0, order)
+
     resp = MessagingResponse()
-
-    try:
-        body = request.form.get("Body", "")
-        sender = request.form.get("From", "").replace("whatsapp:", "")
-        name = request.form.get("ProfileName", "Customer")
-
-        items, amount = parse_order_message(body)
-        order_id = generate_order_id()
-
-        order = {
-            "id": order_id,
-            "customer": name,
-            "phone": sender,
-            "items": items,
-            "amount": amount,
-            "status": "awaiting_payment",
-            "created_at": datetime.utcnow().isoformat()
-        }
-
-        ORDERS.append(order)
-
-        reply = f"""
-✅ Order received – {RESTAURANT['name']}
-
-📋 Items:
-{items}
-
-💰 Total: KES {amount}
-
-💳 Paybill: {RESTAURANT['paybill']}
-🧾 Account: {order_id}
-
-Reply DONE after payment.
-"""
-        resp.message(reply.strip())
-
-    except Exception as e:
-        print("ERROR:", e)
-        resp.message("⚠️ Something went wrong. Please try again.")
+    resp.message(
+        f"✅ Order received from {RESTAURANT['name']}!\n\n"
+        f"📋 Items: {items}\n"
+        f"💰 Total: KES {amount}\n\n"
+        f"💳 Paybill: {RESTAURANT['paybill']}\n"
+        f"📌 Account: {order_id}\n\n"
+        f"Reply DONE after payment."
+    )
 
     return str(resp), 200, {"Content-Type": "text/xml"}
 
 
+# --------------------
+# ORDERS API (DASHBOARD)
+# --------------------
 @app.route("/orders", methods=["GET"])
 def get_orders():
-    return jsonify({"orders": ORDERS})
+    return jsonify({
+        "success": True,
+        "orders": ORDERS
+    })
 
 
+# --------------------
+# HEALTH CHECK
+# --------------------
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+if __name__ == "__main__":
+    app.run()
