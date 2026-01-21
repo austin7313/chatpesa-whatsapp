@@ -1,102 +1,63 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
 from datetime import datetime
-import random
 
 app = Flask(__name__)
-CORS(app)
 
-# --------------------
-# IN-MEMORY STORE
-# --------------------
-ORDERS = []
+# Simulated in-memory orders (replace with your DB)
+ORDERS_DB = {}
 
-RESTAURANT = {
-    "name": "CARIBOU KARIBU",
-    "paybill": "247247"
-}
+# Sample order creation for reference
+# ORDERS_DB["ORD9219"] = {
+#     "id": "ORD9219",
+#     "customer_name": "Wyckyaustin",
+#     "customer_phone": "0722xxxxxx",
+#     "items": "Custom Order",
+#     "amount": 1000,
+#     "status": "AWAITING_PAYMENT",
+#     "created_at": datetime.utcnow().isoformat()
+# }
 
-def generate_order_id():
-    return f"RCP{random.randint(1000, 9999)}"
+@app.route("/mpesa/callback", methods=["POST"])
+def mpesa_callback():
+    """
+    Receive payment confirmation from M-Pesa Daraja (production)
+    """
+    try:
+        data = request.json
+        print(f"📤 M-Pesa Callback Received: {data}")
 
-def parse_order(message):
-    msg = message.lower()
-    items = []
-    amount = 0
+        # Extract relevant fields (adjust according to your Daraja setup)
+        trans_id = data.get("TransactionID")
+        amount = float(data.get("Amount", 0))
+        order_id = data.get("BillRefNumber")  # your Order ID
+        first_name = data.get("FirstName", "")
+        middle_name = data.get("MiddleName", "")
+        last_name = data.get("LastName", "")
 
-    if "burger" in msg:
-        items.append("Burger")
-        amount += 500
-    if "fries" in msg:
-        items.append("Fries")
-        amount += 200
-    if "pizza" in msg:
-        items.append("Pizza")
-        amount += 800
+        customer_name = " ".join([first_name, middle_name, last_name]).strip()
 
-    if not items:
-        items.append("Custom Order")
-        amount = 1000
+        # Validate order exists
+        order = ORDERS_DB.get(order_id)
+        if not order:
+            print(f"❌ Unknown order: {order_id}")
+            return jsonify({"status": "error", "message": "Order not found"}), 404
 
-    return " + ".join(items), amount
+        # Validate amount
+        if amount != order["amount"]:
+            print(f"❌ Amount mismatch: {amount} != {order['amount']}")
+            return jsonify({"status": "error", "message": "Amount mismatch"}), 400
 
+        # Update order
+        order["status"] = "PAID"
+        order["customer_name"] = customer_name
+        order["paid_at"] = datetime.utcnow().isoformat()
+        order["transaction_id"] = trans_id
 
-# --------------------
-# WHATSAPP WEBHOOK
-# --------------------
-@app.route("/webhook/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    incoming_msg = request.form.get("Body", "")
-    from_number = request.form.get("From", "")
-    profile_name = request.form.get("ProfileName", "Customer")
+        print(f"✅ Order {order_id} marked PAID, customer: {customer_name}")
 
-    items, amount = parse_order(incoming_msg)
-    order_id = generate_order_id()
+        # Return 200 to M-Pesa (always!)
+        return jsonify({"status": "success"}), 200
 
-    order = {
-        "id": order_id,
-        "customer": profile_name,
-        "phone": from_number,
-        "items": items,
-        "amount": amount,
-        "status": "AWAITING_PAYMENT",
-        "created_at": datetime.utcnow().isoformat()
-    }
-
-    ORDERS.insert(0, order)
-
-    resp = MessagingResponse()
-    resp.message(
-        f"✅ Order received from {RESTAURANT['name']}!\n\n"
-        f"📋 Items: {items}\n"
-        f"💰 Total: KES {amount}\n\n"
-        f"💳 Paybill: {RESTAURANT['paybill']}\n"
-        f"📌 Account: {order_id}\n\n"
-        f"Reply DONE after payment."
-    )
-
-    return str(resp), 200, {"Content-Type": "text/xml"}
-
-
-# --------------------
-# ORDERS API (DASHBOARD)
-# --------------------
-@app.route("/orders", methods=["GET"])
-def get_orders():
-    return jsonify({
-        "success": True,
-        "orders": ORDERS
-    })
-
-
-# --------------------
-# HEALTH CHECK
-# --------------------
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-if __name__ == "__main__":
-    app.run()
+    except Exception as e:
+        print(f"❌ Callback processing error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
