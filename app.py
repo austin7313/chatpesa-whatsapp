@@ -1,119 +1,102 @@
-import React, { useEffect, useState } from "react";
-import "./App.css"; // optional: your custom CSS
+from flask import Flask, request, jsonify
+from twilio.twiml.messaging_response import MessagingResponse
+import random
+from datetime import datetime
 
-function App() {
-  const [orders, setOrders] = useState([]);
-  const [apiStatus, setApiStatus] = useState(false); // true = online
-  const [loading, setLoading] = useState(true);
+app = Flask(__name__)
 
-  const fetchOrders = async () => {
-    try {
-      const res = await fetch("https://chatpesa-whatsapp.onrender.com/orders");
-      const data = await res.json();
-
-      if (data.status === "ok") {
-        setOrders(data.orders || []);
-        setApiStatus(true);
-      } else {
-        setOrders([]);
-        setApiStatus(false);
-      }
-    } catch (err) {
-      console.error("Failed to fetch orders:", err);
-      setOrders([]);
-      setApiStatus(false);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchOrders(); // initial load
-    const interval = setInterval(fetchOrders, 5000); // refresh every 5 sec
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div style={{ fontFamily: "Arial, sans-serif", padding: "20px" }}>
-      <h1>💳 ChatPesa Dashboard</h1>
-
-      {/* API Status */}
-      <div style={{ marginBottom: "20px" }}>
-        Status:{" "}
-        <span
-          style={{
-            color: "white",
-            padding: "5px 10px",
-            borderRadius: "5px",
-            backgroundColor: apiStatus ? "green" : "red",
-          }}
-        >
-          {apiStatus ? "ONLINE" : "OFFLINE"}
-        </span>
-      </div>
-
-      {loading ? (
-        <p>Loading orders...</p>
-      ) : orders.length === 0 ? (
-        <p>No orders yet.</p>
-      ) : (
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-          }}
-        >
-          <thead>
-            <tr style={{ backgroundColor: "#f0f0f0" }}>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Order ID
-              </th>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Name
-              </th>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Items
-              </th>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Amount (KES)
-              </th>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Status
-              </th>
-              <th style={{ padding: "10px", border: "1px solid #ddd" }}>
-                Time
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map((order) => (
-              <tr key={order.id}>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  {order.id || "—"}
-                </td>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  {order.customer_name || "—"}
-                </td>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  {order.items || "—"}
-                </td>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  KES {order.amount?.toLocaleString() || 0}
-                </td>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  {order.status || "AWAITING_PAYMENT"}
-                </td>
-                <td style={{ padding: "10px", border: "1px solid #ddd" }}>
-                  {new Date(order.created_at).toLocaleString() || "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
+# --- Config ---
+RESTAURANT = {
+    "name": "CARIBOU KARIBU",
+    "paybill": "247247"
 }
 
-export default App;
+# --- In-memory orders store (replace with DB in production) ---
+ORDERS = []
+
+# --- Helpers ---
+def generate_order_id():
+    return f"RCP{random.randint(1000, 9999)}"
+
+def parse_order_message(message):
+    message_lower = message.lower()
+    items = []
+    amount = 0
+
+    if "burger" in message_lower:
+        items.append("Burger")
+        amount += 500
+    if "fries" in message_lower:
+        items.append("Fries")
+        amount += 200
+    if "pizza" in message_lower:
+        items.append("Pizza")
+        amount += 800
+
+    if not items:
+        items.append("Custom Order")
+        amount = 1000
+
+    return {
+        "items": " + ".join(items),
+        "amount": amount
+    }
+
+# --- WhatsApp Webhook ---
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    try:
+        incoming_msg = request.form.get("Body", "").strip()
+        from_number = request.form.get("From", "").replace("whatsapp:", "")
+        profile_name = request.form.get("ProfileName", "Customer")
+
+        print(f"📱 WhatsApp message received: {from_number} | {profile_name} | {incoming_msg}")
+
+        order_details = parse_order_message(incoming_msg)
+        order_id = generate_order_id()
+
+        order_data = {
+            "id": order_id,
+            "customer_phone": from_number,
+            "customer_name": profile_name,
+            "items": order_details["items"],
+            "amount": order_details["amount"],
+            "status": "AWAITING_PAYMENT",
+            "payment_code": order_id,
+            "raw_message": incoming_msg,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+        ORDERS.append(order_data)
+        print(f"✅ Order created: {order_id}")
+
+        resp = MessagingResponse()
+        payment_message = (
+            f"✅ Order received from {RESTAURANT['name']}!\n\n"
+            f"📋 Your Order:\n{order_details['items']}\n\n"
+            f"💰 Total: KES {order_details['amount']:,}\n\n"
+            f"💳 Pay Now:\nPaybill: {RESTAURANT['paybill']}\nAccount: {order_id}\n\n"
+            f"Reply DONE when paid.\nOrder ID: {order_id}"
+        )
+        resp.message(payment_message)
+
+        return str(resp), 200, {'Content-Type': 'text/xml'}
+
+    except Exception as e:
+        print(f"❌ Error in webhook: {str(e)}")
+        error_resp = MessagingResponse()
+        error_resp.message("Sorry, error processing your order. Try again or call us.")
+        return str(error_resp), 200, {'Content-Type': 'text/xml'}
+
+# --- Orders endpoint for React dashboard ---
+@app.route("/orders")
+def get_orders():
+    return jsonify({"orders": ORDERS, "status": "ok"})
+
+# --- Health check ---
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "chatpesa"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
