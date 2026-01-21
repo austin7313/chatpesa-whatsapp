@@ -1,5 +1,4 @@
-Flask==2.3.3
-Flask-Cors==3.0.10
-gunicorn==20.1.0
+Flask==2.3.2
 twilio==7.17.0
-pytz==2025.2
+requests==2.31.0
+gunicorn==20.1.0
