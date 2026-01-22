@@ -1,153 +1,176 @@
+import os
+import base64
+import json
+import requests
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
-import random
-from datetime import datetime
-import requests
-import base64
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory storage
-orders = []
+# ---------------- CONFIG ---------------- #
 
-# Config
-RESTAURANT = {"name": "ChatPesa", "paybill": "247247"}
 MPESA_SHORTCODE = "4031193"
 MPESA_PASSKEY = "5a64ad290753ed331b662cf6d83d3149367867c102f964f522390ccbd85cb282"
-CONSUMER_KEY = "B05zln19QXC3OBL6YuCkdhZ8zvYqZtXP"
-CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
-MPESA_BASE = "https://sandbox.safaricom.co.ke"  # switch to live for production
+MPESA_CONSUMER_KEY = "B05zln19QXC3OBL6YuCkdhZ8zvYqZtXP"
+MPESA_CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
+
+CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
+
+# ---------------- STORAGE (TEMP) ---------------- #
+# Replace with DB later
+orders = {}
+
+# ---------------- HELPERS ---------------- #
+
+def now():
+    return datetime.utcnow().isoformat()
 
 def generate_order_id():
-    return f"CP{random.randint(100000, 999999):06X}"
+    return "CP" + os.urandom(4).hex().upper()
 
-def parse_order_message(msg):
-    msg = msg.lower()
-    items = []
-    amount = 0
-    if "burger" in msg:
-        items.append("Burger")
-        amount += 500
-    if "fries" in msg:
-        items.append("Fries")
-        amount += 200
-    if "pizza" in msg:
-        items.append("Pizza")
-        amount += 800
-    if not items:
-        items.append("Custom Order")
-        amount = 1000
-    return {"items": " + ".join(items), "amount": amount}
+def mpesa_access_token():
+    auth = base64.b64encode(
+        f"{MPESA_CONSUMER_KEY}:{MPESA_CONSUMER_SECRET}".encode()
+    ).decode()
 
-def get_mpesa_token():
-    auth = base64.b64encode(f"{CONSUMER_KEY}:{CONSUMER_SECRET}".encode()).decode()
-    res = requests.get(f"{MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials",
-                       headers={"Authorization": f"Basic {auth}"})
+    res = requests.get(
+        "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+        headers={"Authorization": f"Basic {auth}"}
+    )
     return res.json()["access_token"]
 
-def stk_push(phone, amount, order_id):
-    token = get_mpesa_token()
+def stk_password(timestamp):
+    raw = f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}"
+    return base64.b64encode(raw.encode()).decode()
+
+def send_stk_push(order):
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()).decode()
+    token = mpesa_access_token()
+
     payload = {
         "BusinessShortCode": MPESA_SHORTCODE,
-        "Password": password,
+        "Password": stk_password(timestamp),
         "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
-        "PartyA": phone,
+        "Amount": order["amount"],
+        "PartyA": order["phone"],
         "PartyB": MPESA_SHORTCODE,
-        "PhoneNumber": phone,
-        "CallBackURL": f"https://yourdomain.com/mpesa/callback",
-        "AccountReference": order_id,
-        "TransactionDesc": "ChatPesa Order Payment"
+        "PhoneNumber": order["phone"],
+        "CallBackURL": CALLBACK_URL,
+        "AccountReference": order["id"],
+        "TransactionDesc": "ChatPesa Payment"
     }
-    res = requests.post(f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {token}"})
+
+    res = requests.post(
+        "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
     return res.json()
 
-@app.route("/webhook/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    incoming_msg = request.form.get("Body", "").strip()
-    from_number = request.form.get("From", "").replace("whatsapp:", "")
-    profile_name = request.form.get("ProfileName", from_number)
+# ---------------- ROUTES ---------------- #
 
-    order_details = parse_order_message(incoming_msg)
+@app.route("/")
+def root():
+    return "ChatPesa API ONLINE", 200
+
+@app.route("/orders")
+def get_orders():
+    return jsonify({
+        "status": "ok",
+        "orders": list(orders.values())
+    })
+
+# -------- WHATSAPP WEBHOOK -------- #
+
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp():
+    body = request.form.get("Body", "").strip().upper()
+    phone = request.form.get("From", "").replace("whatsapp:", "")
+    name = request.form.get("ProfileName", phone)
+
+    resp = MessagingResponse()
+
+    # PAY command
+    if body == "PAY":
+        pending = next(
+            (o for o in orders.values()
+             if o["phone"] == phone and o["status"] == "AWAITING_PAYMENT"),
+            None
+        )
+
+        if not pending:
+            resp.message("❌ No pending order found.")
+            return str(resp)
+
+        stk = send_stk_push(pending)
+        pending["status"] = "STK_SENT"
+
+        resp.message(
+            f"📲 Payment request sent.\n"
+            f"Check your phone and enter M-Pesa PIN.\n\n"
+            f"Order ID: {pending['id']}"
+        )
+        return str(resp)
+
+    # NEW ORDER
     order_id = generate_order_id()
 
     order = {
         "id": order_id,
-        "customer_name": profile_name,
-        "customer_phone": from_number,
-        "items": order_details["items"],
-        "amount": order_details["amount"],
+        "customer_name": name,
+        "phone": phone,
+        "items": body or "Custom Order",
+        "amount": 1000,
         "status": "AWAITING_PAYMENT",
-        "created_at": datetime.utcnow().isoformat()
+        "mpesa_name": "",
+        "mpesa_receipt": "",
+        "created_at": now(),
+        "paid_at": ""
     }
-    orders.append(order)
 
-    resp = MessagingResponse()
+    orders[order_id] = order
+
     resp.message(
-        f"✅ Order received!\nOrder ID: {order_id}\nItems: {order['items']}\n"
-        f"Amount: KES {order['amount']}\nReply 'PAY' to pay via M-Pesa."
+        f"✅ Order created\n\n"
+        f"Order ID: {order_id}\n"
+        f"Amount: KES 1000\n\n"
+        f"Reply PAY to pay via M-Pesa"
     )
 
-    return str(resp), 200, {'Content-Type': 'text/xml'}
+    return str(resp)
 
-@app.route("/webhook/pay", methods=["POST"])
-def whatsapp_pay():
-    incoming_msg = request.form.get("Body", "").strip().lower()
-    from_number = request.form.get("From", "").replace("whatsapp:", "")
-    
-    if incoming_msg != "pay":
-        resp = MessagingResponse()
-        resp.message("Please reply with 'PAY' to initiate payment.")
-        return str(resp), 200, {'Content-Type': 'text/xml'}
-
-    # Find order
-    order = next((o for o in orders if o["customer_phone"] == from_number and o["status"]=="AWAITING_PAYMENT"), None)
-    resp = MessagingResponse()
-    if not order:
-        resp.message("No pending order found. Send a message to place an order first.")
-        return str(resp), 200, {'Content-Type': 'text/xml'}
-
-    # Initiate STK push
-    stk_resp = stk_push(from_number, order["amount"], order["id"])
-    resp.message("📲 Payment request sent. Check your M-Pesa and complete the payment.")
-    return str(resp), 200, {'Content-Type': 'text/xml'}
+# -------- MPESA CALLBACK -------- #
 
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
-    data = request.get_json()
-    # parse result
-    if data and "Body" in data:
-        callback = data["Body"]["stkCallback"]
-        order_id = callback["CheckoutRequestID"]
-        result_code = callback["ResultCode"]
-        amount = callback["CallbackMetadata"]["Item"][0]["Value"]
-        mpesa_name = callback["CallbackMetadata"]["Item"][1]["Value"]
-        phone = callback["CallbackMetadata"]["Item"][4]["Value"]
-        
-        # Update order
-        order = next((o for o in orders if o["id"] == order_id), None)
-        if order:
-            order["status"] = "PAID" if result_code==0 else "FAILED"
-            order["customer_name"] = mpesa_name
-            order["amount"] = amount
-            order["customer_phone"] = phone
-            order["paid_at"] = datetime.utcnow().isoformat()
-    return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"})
+    data = request.json
+    callback = data["Body"]["stkCallback"]
 
-@app.route("/orders", methods=["GET"])
-def get_orders():
-    return {"status": "ok", "orders": orders}
+    if callback["ResultCode"] != 0:
+        return jsonify({"status": "failed"})
 
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok", "service": "chatpesa"}
+    meta = {i["Name"]: i["Value"] for i in callback["CallbackMetadata"]["Item"]}
+
+    order_id = meta["AccountReference"]
+    order = orders.get(order_id)
+
+    if not order:
+        return jsonify({"status": "unknown_order"})
+
+    order["status"] = "PAID"
+    order["mpesa_receipt"] = meta.get("MpesaReceiptNumber", "")
+    order["mpesa_name"] = meta.get("CustomerName", "")
+    order["paid_at"] = now()
+
+    return jsonify({"status": "ok"})
+
+# ---------------- START ---------------- #
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False)
