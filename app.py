@@ -1,85 +1,68 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
-from datetime import datetime
 import uuid
+import datetime
 import os
 
 app = Flask(__name__)
 CORS(app)
 
-# -----------------------------
-# In-memory store (safe for now)
-# -----------------------------
-ORDERS = []
+ORDERS = {}  # replace with DB later
 
-# -----------------------------
-# Universal Twilio Webhook
-# -----------------------------
-@app.route("/", methods=["POST", "GET"])
-@app.route("/whatsapp", methods=["POST", "GET"])
-@app.route("/webhook/whatsapp", methods=["POST", "GET"])
-@app.route("/twilio", methods=["POST", "GET"])
-@app.route("/twilio/whatsapp", methods=["POST", "GET"])
-def twilio_webhook():
-    """
-    ONE webhook to rule them all.
-    Accepts any Twilio WhatsApp/SMS webhook path.
-    Always responds with valid TwiML.
-    """
+def now():
+    return datetime.datetime.now().isoformat()
 
-    incoming_msg = request.form.get("Body", "").strip()
-    from_number = request.form.get("From", "")
-    timestamp = datetime.utcnow().isoformat()
-
-    print("📩 TWILIO MESSAGE")
-    print("From:", from_number)
-    print("Body:", incoming_msg)
-
-    # Generate Order
-    order_id = f"CP{uuid.uuid4().hex[:6].upper()}"
-
-    order = {
-        "id": order_id,
-        "customer_name": from_number,  # replaced later by M-Pesa name
-        "customer_phone": from_number,
-        "items": incoming_msg or "Custom Order",
-        "amount": 1000,
-        "status": "AWAITING_PAYMENT",
-        "created_at": timestamp,
-    }
-
-    ORDERS.insert(0, order)
+@app.route("/webhook/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    msg = request.form.get("Body", "").strip().upper()
+    sender = request.form.get("From")
 
     resp = MessagingResponse()
-    resp.message(
-        f"✅ ChatPesa Order Created\n\n"
+    reply = resp.message()
+
+    # PAY confirmation
+    if msg == "PAY":
+        pending = [o for o in ORDERS.values() if o["phone"] == sender and o["status"] == "AWAITING_PAYMENT"]
+        if not pending:
+            reply.body("No pending order found.")
+            return str(resp)
+
+        order = pending[-1]
+        # 🔔 STK PUSH WILL BE TRIGGERED HERE (next phase)
+        reply.body("M-Pesa payment request sent 📲\nEnter your PIN to complete payment.")
+        return str(resp)
+
+    # Create new order
+    order_id = f"CP{uuid.uuid4().hex[:6].upper()}"
+    ORDERS[order_id] = {
+        "id": order_id,
+        "name": sender,
+        "phone": sender,
+        "items": msg or "Custom Order",
+        "amount": 1000,
+        "status": "AWAITING_PAYMENT",
+        "created_at": now()
+    }
+
+    reply.body(
+        f"Order created ✅\n"
         f"Order ID: {order_id}\n"
         f"Amount: KES 1000\n\n"
-        f"You will receive an M-Pesa prompt shortly."
+        f"Reply PAY to pay via M-Pesa"
     )
+    return str(resp)
 
-    return str(resp), 200, {"Content-Type": "text/xml"}
-
-# -----------------------------
-# Dashboard API
-# -----------------------------
-@app.route("/orders", methods=["GET"])
-def get_orders():
+@app.route("/orders")
+def orders():
     return jsonify({
         "status": "ok",
-        "orders": ORDERS
+        "orders": list(ORDERS.values())
     })
 
-# -----------------------------
-# Health Check (Render / Uptime)
-# -----------------------------
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
-    return jsonify({"status": "ok", "service": "ChatPesa"}), 200
+    return "OK", 200
 
-# -----------------------------
-# App Entrypoint
-# -----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run()
