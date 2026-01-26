@@ -1,4 +1,4 @@
-import os
+     import os
 import uuid
 import base64
 import datetime
@@ -22,9 +22,27 @@ CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
 MPESA_BASE = "https://api.safaricom.co.ke"
 CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
 
-# In-memory storage (fast & production-safe for now)
 ORDERS = {}
 SESSIONS = {}
+
+# ================= TOKEN CACHE =================
+MPESA_TOKEN_CACHE = {"token": None, "expires": 0}
+
+def mpesa_token():
+    now_ts = int(datetime.datetime.utcnow().timestamp())
+    if MPESA_TOKEN_CACHE["token"] and MPESA_TOKEN_CACHE["expires"] > now_ts + 30:
+        return MPESA_TOKEN_CACHE["token"]
+
+    r = requests.get(
+        "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+        auth=(CONSUMER_KEY, CONSUMER_SECRET),
+        timeout=5
+    )
+    r.raise_for_status()
+    token = r.json()["access_token"]
+    MPESA_TOKEN_CACHE["token"] = token
+    MPESA_TOKEN_CACHE["expires"] = now_ts + 3500  # 3600s lifetime minus buffer
+    return token
 
 # ================= HELPERS =================
 def now():
@@ -38,25 +56,12 @@ def normalize_phone(phone):
         phone = "254" + phone
     return phone
 
-def mpesa_token():
-    r = requests.get(
-        "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
-        auth=(CONSUMER_KEY, CONSUMER_SECRET),
-        timeout=10
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
-
 def stk_push_async(order):
-    """Run STK push in background thread."""
+    """Run STK push in background thread (CRITICAL FIX)."""
     try:
         token = mpesa_token()
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-
-        password = base64.b64encode(
-            f"{SHORTCODE}{PASSKEY}{timestamp}".encode()
-        ).decode()
-
+        password = base64.b64encode(f"{SHORTCODE}{PASSKEY}{timestamp}".encode()).decode()
         phone = normalize_phone(order["phone"])
 
         payload = {
@@ -69,7 +74,7 @@ def stk_push_async(order):
             "PartyB": SHORTCODE,
             "PhoneNumber": phone,
             "CallBackURL": CALLBACK_URL,
-            "AccountReference": order["id"],
+            "AccountReference": order["id"],  # UNIQUE reference for safe matching
             "TransactionDesc": "ChatPesa Payment"
         }
 
@@ -82,9 +87,8 @@ def stk_push_async(order):
             f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
             json=payload,
             headers=headers,
-            timeout=10
+            timeout=5
         )
-
         print("✅ STK STATUS:", r.status_code)
         print("✅ STK BODY:", r.text)
 
@@ -96,17 +100,13 @@ def stk_push_async(order):
 def whatsapp():
     body = request.values.get("Body", "").strip().upper()
     phone = request.values.get("From")
-
     resp = MessagingResponse()
     msg = resp.message()
 
     session = SESSIONS.get(phone, {"step": "START"})
 
     if session["step"] == "START":
-        msg.body(
-            "👋 Welcome to ChatPesa\n\n"
-            "Reply 1️⃣ to make a payment"
-        )
+        msg.body("👋 Welcome to ChatPesa\n\nReply 1️⃣ to make a payment")
         session["step"] = "MENU"
 
     elif session["step"] == "MENU" and body == "1":
@@ -130,27 +130,21 @@ def whatsapp():
             "amount": amount,
             "status": "AWAITING_PAYMENT",
             "customer_name": phone,
-            "created_at": now()
+            "created_at": now(),
+            "mpesa_receipt": None
         }
 
         session["order_id"] = order_id
         session["step"] = "CONFIRM"
 
         msg.body(
-            f"🧾 Order ID: {order_id}\n"
-            f"Amount: KES {amount}\n\n"
-            f"Reply PAY to receive M-Pesa prompt"
+            f"🧾 Order ID: {order_id}\nAmount: KES {amount}\n\nReply PAY to receive M-Pesa prompt"
         )
 
     elif session["step"] == "CONFIRM" and body == "PAY":
         order = ORDERS.get(session["order_id"])
-
-        # Respond to WhatsApp FIRST
         msg.body("📲 Sending M-Pesa prompt. Enter your PIN.")
-
-        # Trigger STK in background
         threading.Thread(target=stk_push_async, args=(order,)).start()
-
         session["step"] = "DONE"
 
     else:
@@ -166,22 +160,28 @@ def mpesa_callback():
     cb = data["Body"]["stkCallback"]
 
     if cb["ResultCode"] == 0:
+        # Extract metadata
         meta = cb["CallbackMetadata"]["Item"]
-
         receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
         phone = str(next(i["Value"] for i in meta if i["Name"] == "PhoneNumber"))
         amount = next(i["Value"] for i in meta if i["Name"] == "Amount")
 
-        for o in ORDERS.values():
-            if (
-                o["status"] == "AWAITING_PAYMENT"
-                and normalize_phone(o["phone"]) == phone
-                and o["amount"] == amount
-            ):
-                o["status"] = "PAID"
-                o["mpesa_receipt"] = receipt
-                o["paid_at"] = now()
-                break
+        # Match by AccountReference (order_id)
+        cb_ref = cb.get("CheckoutRequestID") or cb.get("AccountReference")
+        order = ORDERS.get(cb_ref)
+
+        if order:
+            order["status"] = "PAID"
+            order["mpesa_receipt"] = receipt
+            order["paid_at"] = now()
+        else:
+            # fallback: match by phone + amount
+            for o in ORDERS.values():
+                if o["status"] == "AWAITING_PAYMENT" and normalize_phone(o["phone"]) == normalize_phone(phone) and o["amount"] == amount:
+                    o["status"] = "PAID"
+                    o["mpesa_receipt"] = receipt
+                    o["paid_at"] = now()
+                    break
 
     return jsonify({"status": "ok"})
 
@@ -197,4 +197,4 @@ def root():
 # ================= SERVER =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
