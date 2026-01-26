@@ -2,6 +2,7 @@ import os
 import uuid
 import base64
 import datetime
+import threading
 import requests
 
 from flask import Flask, request, jsonify
@@ -29,7 +30,7 @@ def now():
     return datetime.datetime.utcnow().isoformat()
 
 def normalize_phone(phone):
-    phone = phone.replace("whatsapp:", "").replace("+", "")
+    phone = phone.replace("whatsapp:", "").replace("+", "").strip()
     if phone.startswith("0"):
         phone = "254" + phone[1:]
     if phone.startswith("7"):
@@ -42,52 +43,59 @@ def mpesa_token():
         auth=(CONSUMER_KEY, CONSUMER_SECRET),
         timeout=10
     )
+    r.raise_for_status()
     return r.json()["access_token"]
 
-def stk_push(order):
-    token = mpesa_token()
+def stk_push_async(order):
+    """Run STK push in background thread (CRITICAL FIX)."""
+    try:
+        token = mpesa_token()
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
-    ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(
-        f"{SHORTCODE}{PASSKEY}{ts}".encode()
-    ).decode()
+        password = base64.b64encode(
+            f"{SHORTCODE}{PASSKEY}{timestamp}".encode()
+        ).decode()
 
-    phone = normalize_phone(order["phone"])
+        phone = normalize_phone(order["phone"])
 
-    payload = {
-        "BusinessShortCode": SHORTCODE,
-        "Password": password,
-        "Timestamp": ts,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": order["amount"],
-        "PartyA": phone,
-        "PartyB": SHORTCODE,
-        "PhoneNumber": phone,
-        "CallBackURL": CALLBACK_URL,
-        "AccountReference": order["id"],
-        "TransactionDesc": "ChatPesa Payment"
-    }
+        payload = {
+            "BusinessShortCode": SHORTCODE,
+            "Password": password,
+            "Timestamp": timestamp,
+            "TransactionType": "CustomerPayBillOnline",
+            "Amount": int(order["amount"]),
+            "PartyA": phone,
+            "PartyB": SHORTCODE,
+            "PhoneNumber": phone,
+            "CallBackURL": CALLBACK_URL,
+            "AccountReference": order["id"],
+            "TransactionDesc": "ChatPesa Payment"
+        }
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
 
-    r = requests.post(
-        f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
-        json=payload,
-        headers=headers,
-        timeout=10
-    )
+        r = requests.post(
+            f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
 
-    print("STK STATUS:", r.status_code)
-    print("STK RESPONSE:", r.text)
+        print("✅ STK STATUS:", r.status_code)
+        print("✅ STK BODY:", r.text)
+
+    except Exception as e:
+        print("❌ STK ERROR:", str(e))
 
 # ================= WHATSAPP =================
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp():
     body = request.values.get("Body", "").strip().upper()
     phone = request.values.get("From")
+
     resp = MessagingResponse()
     msg = resp.message()
 
@@ -101,7 +109,7 @@ def whatsapp():
         session["step"] = "MENU"
 
     elif session["step"] == "MENU" and body == "1":
-        msg.body("💳 Enter amount to pay (KES)\nMinimum 10")
+        msg.body("💰 Enter amount to pay (KES)\nMinimum: 10")
         session["step"] = "AMOUNT"
 
     elif session["step"] == "AMOUNT":
@@ -130,13 +138,18 @@ def whatsapp():
         msg.body(
             f"🧾 Order ID: {order_id}\n"
             f"Amount: KES {amount}\n\n"
-            f"Reply PAY to confirm"
+            f"Reply PAY to receive M-Pesa prompt"
         )
 
     elif session["step"] == "CONFIRM" and body == "PAY":
         order = ORDERS.get(session["order_id"])
-        stk_push(order)
-        msg.body("📲 M-Pesa prompt sent. Enter your PIN.")
+
+        # 🚀 CRITICAL FIX: respond to WhatsApp FIRST
+        msg.body("📲 Sending M-Pesa prompt. Enter your PIN.")
+
+        # 🚀 then trigger STK in background
+        threading.Thread(target=stk_push_async, args=(order,)).start()
+
         session["step"] = "DONE"
 
     else:
@@ -153,14 +166,20 @@ def mpesa_callback():
 
     if cb["ResultCode"] == 0:
         meta = cb["CallbackMetadata"]["Item"]
+
         receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
-        name = next((i["Value"] for i in meta if i["Name"] == "SenderName"), receipt)
+        phone = str(next(i["Value"] for i in meta if i["Name"] == "PhoneNumber"))
+        amount = next(i["Value"] for i in meta if i["Name"] == "Amount")
 
         for o in ORDERS.values():
-            if o["status"] == "AWAITING_PAYMENT":
+            if (
+                o["status"] == "AWAITING_PAYMENT"
+                and normalize_phone(o["phone"]) == phone
+                and o["amount"] == amount
+            ):
                 o["status"] = "PAID"
-                o["customer_name"] = name
-                o["created_at"] = now()
+                o["mpesa_receipt"] = receipt
+                o["paid_at"] = now()
                 break
 
     return jsonify({"status": "ok"})
