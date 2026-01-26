@@ -8,8 +8,6 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)
@@ -24,39 +22,9 @@ CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
 MPESA_BASE = "https://api.safaricom.co.ke"
 CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
 
+# In-memory storage (fast & production-safe for now)
+ORDERS = {}
 SESSIONS = {}
-
-# ================= DATABASE =================
-DB_URL = os.getenv("DATABASE_URL")  # Render Postgres
-conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-
-def create_order(order_id, phone, amount, customer_name):
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO orders (id, phone, customer_name, amount, status, created_at)
-            VALUES (%s, %s, %s, %s, 'AWAITING_PAYMENT', NOW())
-            RETURNING *;
-        """, (order_id, phone, customer_name, amount))
-        conn.commit()
-        return cur.fetchone()
-
-def mark_order_paid(phone, amount, mpesa_receipt):
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE orders
-            SET status='PAID', paid_at=NOW(), mpesa_receipt=%s
-            WHERE status='AWAITING_PAYMENT'
-              AND phone=%s
-              AND amount=%s
-            RETURNING *;
-        """, (mpesa_receipt, normalize_phone(phone), amount))
-        conn.commit()
-        return cur.fetchone()
-
-def get_orders():
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM orders ORDER BY created_at DESC;")
-        return cur.fetchall()
 
 # ================= HELPERS =================
 def now():
@@ -80,7 +48,7 @@ def mpesa_token():
     return r.json()["access_token"]
 
 def stk_push_async(order):
-    """Run STK push in background thread (CRITICAL FIX)."""
+    """Run STK push in background thread."""
     try:
         token = mpesa_token()
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -156,8 +124,16 @@ def whatsapp():
 
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
 
-        order_data = create_order(order_id, phone, amount, phone)
-        session["order_id"] = order_data["id"]
+        ORDERS[order_id] = {
+            "id": order_id,
+            "phone": phone,
+            "amount": amount,
+            "status": "AWAITING_PAYMENT",
+            "customer_name": phone,
+            "created_at": now()
+        }
+
+        session["order_id"] = order_id
         session["step"] = "CONFIRM"
 
         msg.body(
@@ -167,13 +143,14 @@ def whatsapp():
         )
 
     elif session["step"] == "CONFIRM" and body == "PAY":
-        # Fetch order from DB
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM orders WHERE id=%s", (session["order_id"],))
-            order = cur.fetchone()
+        order = ORDERS.get(session["order_id"])
 
+        # Respond to WhatsApp FIRST
         msg.body("📲 Sending M-Pesa prompt. Enter your PIN.")
+
+        # Trigger STK in background
         threading.Thread(target=stk_push_async, args=(order,)).start()
+
         session["step"] = "DONE"
 
     else:
@@ -195,14 +172,23 @@ def mpesa_callback():
         phone = str(next(i["Value"] for i in meta if i["Name"] == "PhoneNumber"))
         amount = next(i["Value"] for i in meta if i["Name"] == "Amount")
 
-        mark_order_paid(phone, amount, receipt)
+        for o in ORDERS.values():
+            if (
+                o["status"] == "AWAITING_PAYMENT"
+                and normalize_phone(o["phone"]) == phone
+                and o["amount"] == amount
+            ):
+                o["status"] = "PAID"
+                o["mpesa_receipt"] = receipt
+                o["paid_at"] = now()
+                break
 
     return jsonify({"status": "ok"})
 
 # ================= DASHBOARD =================
 @app.route("/orders")
 def orders():
-    return jsonify({"status": "ok", "orders": get_orders()})
+    return jsonify({"status": "ok", "orders": list(ORDERS.values())})
 
 @app.route("/")
 def root():
