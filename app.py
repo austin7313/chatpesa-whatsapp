@@ -5,7 +5,6 @@ import datetime
 import threading
 import time
 import requests
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
@@ -21,21 +20,27 @@ PASSKEY = os.environ.get("MPESA_PASSKEY", "YOUR_PASSKEY_HERE")
 CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY", "YOUR_CONSUMER_KEY")
 CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET", "YOUR_CONSUMER_SECRET")
 
-CALLBACK_URL = os.environ.get("MPESA_CALLBACK_URL", "https://chatpesa-whatsapp.onrender.com/mpesa/callback")
+CALLBACK_URL = os.environ.get(
+    "MPESA_CALLBACK_URL", "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
+)
 MPESA_BASE = "https://api.safaricom.co.ke"
 
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Twilio sandbox / prod
+WHATSAPP_NUMBER = os.environ.get(
+    "WHATSAPP_NUMBER", "whatsapp:+14155238886"
+)  # Twilio sandbox / prod
 
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
+# In-memory storage (upgrade to DB/Redis for persistence)
 ORDERS = {}
 SESSIONS = {}
 
 # ================= HELPERS =================
 def now():
     return datetime.datetime.utcnow().isoformat()
+
 
 def normalize_phone(phone):
     phone = phone.replace("whatsapp:", "").replace("+", "").strip()
@@ -44,6 +49,7 @@ def normalize_phone(phone):
     if phone.startswith("7"):
         phone = "254" + phone
     return phone
+
 
 def mpesa_token():
     r = requests.get(
@@ -54,28 +60,27 @@ def mpesa_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-def send_whatsapp(to, text, delay=1.2):
-    """Send WhatsApp message asynchronously with optional delay."""
+
+def send_whatsapp(to, text, delay=1.5):
+    """Send WhatsApp message asynchronously with human-like delay."""
     def _send():
-        # Simulate typing (Twilio doesn't have true typing, just delay)
         time.sleep(delay)
         twilio_client.messages.create(
             from_=WHATSAPP_NUMBER,
             to=to,
             body=text,
         )
+
     threading.Thread(target=_send).start()
+
 
 # ================= STK PUSH =================
 def stk_push_async(order):
-    """Trigger STK push in background thread."""
+    """Trigger STK push asynchronously."""
     try:
         token = mpesa_token()
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        password = base64.b64encode(
-            f"{SHORTCODE}{PASSKEY}{timestamp}".encode()
-        ).decode()
-
+        password = base64.b64encode(f"{SHORTCODE}{PASSKEY}{timestamp}".encode()).decode()
         phone = normalize_phone(order["phone"])
 
         payload = {
@@ -88,26 +93,20 @@ def stk_push_async(order):
             "PartyB": SHORTCODE,
             "PhoneNumber": phone,
             "CallBackURL": CALLBACK_URL,
-            "AccountReference": order["id"],  # Important: match order
+            "AccountReference": order["id"],
             "TransactionDesc": "ChatPesa Payment",
         }
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
         r = requests.post(
-            f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
-            json=payload,
-            headers=headers,
-            timeout=10,
+            f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest", json=payload, headers=headers, timeout=10
         )
-        print("✅ STK Push Sent:", r.status_code)
-        print(r.text)
+        print("✅ STK Push Sent:", r.status_code, r.text)
 
     except Exception as e:
         print("❌ STK ERROR:", e)
+
 
 # ================= WHATSAPP =================
 @app.route("/webhook/whatsapp", methods=["POST"])
@@ -139,7 +138,6 @@ def whatsapp():
             return str(resp)
 
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
-
         ORDERS[order_id] = {
             "id": order_id,
             "phone": phone,
@@ -158,9 +156,7 @@ def whatsapp():
 
     elif session["step"] == "CONFIRM" and body.upper() == "PAY":
         order = ORDERS.get(session["order_id"])
-
         msg.body("📲 Sending M-Pesa prompt…")
-
         threading.Thread(target=stk_push_async, args=(order,)).start()
         session["step"] = "DONE"
 
@@ -170,19 +166,20 @@ def whatsapp():
     SESSIONS[phone] = session
     return str(resp), 200
 
+
 # ================= MPESA CALLBACK =================
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
     data = request.json
-    cb = data["Body"]["stkCallback"]
+    cb = data.get("Body", {}).get("stkCallback", {})
+    meta = cb.get("CallbackMetadata", {}).get("Item", [])
 
     order_id = None
     receipt = None
     amount = None
     phone = None
 
-    # 🔹 Extract metadata
-    meta = cb.get("CallbackMetadata", {}).get("Item", [])
+    # Extract all possible fields
     for item in meta:
         if item["Name"] == "AccountReference":
             order_id = item["Value"]
@@ -193,40 +190,42 @@ def mpesa_callback():
         elif item["Name"] == "PhoneNumber":
             phone = str(item["Value"])
 
-    if cb["ResultCode"] == 0 and order_id in ORDERS:
-        order = ORDERS[order_id]
-        order["status"] = "PAID"
-        order["mpesa_receipt"] = receipt
-        order["paid_at"] = now()
+    # Fallback: use TransactionDesc if AccountReference missing
+    if not order_id:
+        order_id = cb.get("TransactionDesc", "")
 
+    matched_order = ORDERS.get(order_id)
+
+    if cb.get("ResultCode") == 0 and matched_order:
+        matched_order["status"] = "PAID"
+        matched_order["mpesa_receipt"] = receipt
+        matched_order["paid_at"] = now()
         send_whatsapp(
-            order["phone"],
-            f"✅ Payment successful!\n\nOrder: {order_id}\nAmount: KES {order['amount']}\nReceipt: {receipt}\n\nThank you 🙏",
-            delay=1.5,
+            matched_order["phone"],
+            f"✅ Payment successful!\n\nOrder: {order_id}\nAmount: KES {matched_order['amount']}\nReceipt: {receipt}\n\nThank you 🙏",
         )
-
-    elif cb["ResultCode"] != 0 and order_id in ORDERS:
-        order = ORDERS[order_id]
-        order["status"] = "FAILED"
+    elif cb.get("ResultCode") != 0 and matched_order:
+        matched_order["status"] = "FAILED"
         send_whatsapp(
-            order["phone"],
+            matched_order["phone"],
             f"❌ Payment failed or cancelled.\n\nOrder: {order_id}\nReply PAY to try again.",
-            delay=1.5,
         )
-
     else:
         print("❌ Callback received but order not found:", order_id)
 
     return jsonify({"status": "ok"})
+
 
 # ================= DASHBOARD =================
 @app.route("/orders")
 def orders():
     return jsonify(list(ORDERS.values()))
 
+
 @app.route("/")
 def root():
     return "ChatPesa API ONLINE", 200
+
 
 # ================= SERVER =================
 if __name__ == "__main__":
