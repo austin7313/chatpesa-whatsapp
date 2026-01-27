@@ -3,6 +3,7 @@ import uuid
 import base64
 import datetime
 import threading
+import time
 import requests
 
 from flask import Flask, request, jsonify
@@ -10,18 +11,25 @@ from flask_cors import CORS
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 
+# ================= APP =================
 app = Flask(__name__)
 CORS(app)
 
 # ================= CONFIG =================
-SHORTCODE = "4031193"
-PASSKEY = "5a64ad290753ed331b662cf6d83d3149367867c102f964f522390ccbd85cb282"
+SHORTCODE = os.environ.get("MPESA_SHORTCODE", "4031193")
+PASSKEY = os.environ.get("MPESA_PASSKEY", "REPLACE_ME")
 
-CONSUMER_KEY = "B05zln19QXC3OBL6YuCkdhZ8zvYqZtXP"
-CONSUMER_SECRET = "MYRasd2p9gGFcuCR"
+CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY", "REPLACE_ME")
+CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET", "REPLACE_ME")
 
-MPESA_BASE = "https://api.safaricom.co.ke"
 CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
+MPESA_BASE = "https://api.safaricom.co.ke"
+
+TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+WHATSAPP_NUMBER = "whatsapp:+14155238886"  # Twilio sandbox / prod number
+
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
 ORDERS = {}
 SESSIONS = {}
@@ -31,7 +39,7 @@ def now():
     return datetime.datetime.utcnow().isoformat()
 
 def normalize_phone(phone):
-    phone = phone.replace("whatsapp:", "").replace("+", "")
+    phone = phone.replace("whatsapp:", "").replace("+", "").strip()
     if phone.startswith("0"):
         phone = "254" + phone[1:]
     if phone.startswith("7"):
@@ -40,77 +48,81 @@ def normalize_phone(phone):
 
 def mpesa_token():
     r = requests.get(
-        "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+        f"{MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials",
         auth=(CONSUMER_KEY, CONSUMER_SECRET),
-        timeout=10
+        timeout=10,
     )
     r.raise_for_status()
     return r.json()["access_token"]
 
+def send_whatsapp(to, text, delay=1.2):
+    def _send():
+        time.sleep(delay)
+        twilio_client.messages.create(
+            from_=WHATSAPP_NUMBER,
+            to=to,
+            body=text,
+        )
+    threading.Thread(target=_send).start()
+
+# ================= STK PUSH =================
+def stk_push_async(order):
+    try:
+        token = mpesa_token()
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        password = base64.b64encode(
+            f"{SHORTCODE}{PASSKEY}{timestamp}".encode()
+        ).decode()
+
+        phone = normalize_phone(order["phone"])
+
+        payload = {
+            "BusinessShortCode": SHORTCODE,
+            "Password": password,
+            "Timestamp": timestamp,
+            "TransactionType": "CustomerPayBillOnline",
+            "Amount": int(order["amount"]),
+            "PartyA": phone,
+            "PartyB": SHORTCODE,
+            "PhoneNumber": phone,
+            "CallBackURL": CALLBACK_URL,
+            "AccountReference": order["id"],  # 🔑 CRITICAL
+            "TransactionDesc": "ChatPesa Payment",
+        }
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        requests.post(
+            f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
+            json=payload,
+            headers=headers,
+            timeout=10,
+        )
+
+    except Exception as e:
+        print("STK ERROR:", e)
+
 # ================= WHATSAPP =================
-def send_whatsapp_message(to, text):
-    client = Client(
-        os.environ["TWILIO_ACCOUNT_SID"],
-        os.environ["TWILIO_AUTH_TOKEN"]
-    )
-
-    client.messages.create(
-        from_=f"whatsapp:{os.environ['TWILIO_WHATSAPP_NUMBER']}",
-        to=to,
-        body=text
-    )
-
-# ================= STK =================
-def stk_push(order):
-    token = mpesa_token()
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(
-        f"{SHORTCODE}{PASSKEY}{timestamp}".encode()
-    ).decode()
-
-    phone = normalize_phone(order["phone"])
-
-    payload = {
-        "BusinessShortCode": SHORTCODE,
-        "Password": password,
-        "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": order["amount"],
-        "PartyA": phone,
-        "PartyB": SHORTCODE,
-        "PhoneNumber": phone,
-        "CallBackURL": CALLBACK_URL,
-        "AccountReference": order["id"],
-        "TransactionDesc": "ChatPesa"
-    }
-
-    requests.post(
-        f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
-        json=payload,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=10
-    )
-
-# ================= WHATSAPP WEBHOOK =================
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp():
     body = request.values.get("Body", "").strip()
     phone = request.values.get("From")
-    profile = request.values.get("ProfileName", "").strip()
+    profile_name = request.values.get("ProfileName") or ""
 
-    session = SESSIONS.get(phone, {"step": "START"})
     resp = MessagingResponse()
     msg = resp.message()
 
+    session = SESSIONS.get(phone, {"step": "START"})
+
     if session["step"] == "START":
-        session["name"] = profile or None
-        msg.body(
-            f"👋 Hi {session['name'] or ''}\nReply 1️⃣ to make a payment"
-        )
+        msg.body("👋 Hi! Welcome to ChatPesa\n\nReply 1️⃣ to make a payment")
         session["step"] = "MENU"
 
     elif session["step"] == "MENU" and body == "1":
-        msg.body("💰 Enter amount (KES)")
+        msg.body("💰 Enter amount to pay (KES)\nMinimum: 10")
         session["step"] = "AMOUNT"
 
     elif session["step"] == "AMOUNT":
@@ -119,7 +131,7 @@ def whatsapp():
             if amount < 10:
                 raise ValueError
         except:
-            msg.body("❌ Invalid amount")
+            msg.body("❌ Invalid amount. Enter a number ≥ 10")
             return str(resp)
 
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
@@ -127,30 +139,31 @@ def whatsapp():
         ORDERS[order_id] = {
             "id": order_id,
             "phone": phone,
-            "customer": session["name"],
+            "customer": profile_name or phone,
             "amount": amount,
             "status": "PENDING",
-            "created_at": now()
+            "created_at": now(),
         }
 
-        session["order"] = order_id
+        session["order_id"] = order_id
         session["step"] = "CONFIRM"
 
         msg.body(
             f"🧾 Order {order_id}\n"
             f"Amount: KES {amount}\n\n"
-            f"Reply PAY to confirm"
+            f"Reply PAY to receive M-Pesa prompt"
         )
 
     elif session["step"] == "CONFIRM" and body.upper() == "PAY":
+        order = ORDERS.get(session["order_id"])
+
         msg.body("📲 Sending M-Pesa prompt…")
 
-        threading.Thread(
-            target=stk_push,
-            args=(ORDERS[session["order"]],)
-        ).start()
+        threading.Thread(target=stk_push_async, args=(order,)).start()
+        session["step"] = "DONE"
 
-        session["step"] = "WAIT"
+    else:
+        msg.body("Reply 1️⃣ to start a payment")
 
     SESSIONS[phone] = session
     return str(resp), 200
@@ -158,44 +171,44 @@ def whatsapp():
 # ================= MPESA CALLBACK =================
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
-    cb = request.json["Body"]["stkCallback"]
+    data = request.json
+    cb = data["Body"]["stkCallback"]
 
-    metadata = cb.get("CallbackMetadata", {}).get("Item", [])
-    data = {i["Name"]: i.get("Value") for i in metadata}
+    order_id = cb.get("AccountReference")
 
-    order_id = data.get("AccountReference")
-    receipt = data.get("MpesaReceiptNumber")
+    if not order_id or order_id not in ORDERS:
+        print("❌ Callback received but order not found")
+        return jsonify({"status": "ignored"})
 
-    order = ORDERS.get(order_id)
-    if not order:
-        return jsonify({"ignored": True})
+    order = ORDERS[order_id]
 
     if cb["ResultCode"] == 0:
+        meta = cb["CallbackMetadata"]["Item"]
+        receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
+
         order["status"] = "PAID"
-        order["receipt"] = receipt
+        order["mpesa_receipt"] = receipt
         order["paid_at"] = now()
 
-        threading.Thread(
-            target=send_whatsapp_message,
-            args=(
-                order["phone"],
-                f"✅ Payment successful!\n\n"
-                f"Order: {order_id}\n"
-                f"Amount: KES {order['amount']}\n"
-                f"Receipt: {receipt}\n\n"
-                f"Thank you 🙏"
-            )
-        ).start()
+        send_whatsapp(
+            order["phone"],
+            f"✅ Payment successful!\n\n"
+            f"Order: {order_id}\n"
+            f"Amount: KES {order['amount']}\n"
+            f"Receipt: {receipt}\n\nThank you 🙏",
+            delay=1.5,
+        )
+
     else:
         order["status"] = "FAILED"
 
-        threading.Thread(
-            target=send_whatsapp_message,
-            args=(
-                order["phone"],
-                f"❌ Payment failed\nOrder: {order_id}\nTry again."
-            )
-        ).start()
+        send_whatsapp(
+            order["phone"],
+            f"❌ Payment failed or cancelled.\n\n"
+            f"Order: {order_id}\n"
+            f"You can reply PAY to try again.",
+            delay=1.5,
+        )
 
     return jsonify({"status": "ok"})
 
@@ -208,5 +221,7 @@ def orders():
 def root():
     return "ChatPesa API ONLINE", 200
 
+# ================= SERVER =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
