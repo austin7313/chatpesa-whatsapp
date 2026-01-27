@@ -17,17 +17,16 @@ CORS(app)
 
 # ================= CONFIG =================
 SHORTCODE = os.environ.get("MPESA_SHORTCODE", "4031193")
-PASSKEY = os.environ.get("MPESA_PASSKEY", "REPLACE_ME")
+PASSKEY = os.environ.get("MPESA_PASSKEY", "YOUR_PASSKEY_HERE")
+CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY", "YOUR_CONSUMER_KEY")
+CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET", "YOUR_CONSUMER_SECRET")
 
-CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY", "REPLACE_ME")
-CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET", "REPLACE_ME")
-
-CALLBACK_URL = "https://chatpesa-whatsapp.onrender.com/mpesa/callback"
+CALLBACK_URL = os.environ.get("MPESA_CALLBACK_URL", "https://chatpesa-whatsapp.onrender.com/mpesa/callback")
 MPESA_BASE = "https://api.safaricom.co.ke"
 
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-WHATSAPP_NUMBER = "whatsapp:+14155238886"  # Twilio sandbox / prod number
+WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Twilio sandbox / prod
 
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
@@ -56,7 +55,9 @@ def mpesa_token():
     return r.json()["access_token"]
 
 def send_whatsapp(to, text, delay=1.2):
+    """Send WhatsApp message asynchronously with optional delay."""
     def _send():
+        # Simulate typing (Twilio doesn't have true typing, just delay)
         time.sleep(delay)
         twilio_client.messages.create(
             from_=WHATSAPP_NUMBER,
@@ -67,6 +68,7 @@ def send_whatsapp(to, text, delay=1.2):
 
 # ================= STK PUSH =================
 def stk_push_async(order):
+    """Trigger STK push in background thread."""
     try:
         token = mpesa_token()
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -86,7 +88,7 @@ def stk_push_async(order):
             "PartyB": SHORTCODE,
             "PhoneNumber": phone,
             "CallBackURL": CALLBACK_URL,
-            "AccountReference": order["id"],  # 🔑 CRITICAL
+            "AccountReference": order["id"],  # Important: match order
             "TransactionDesc": "ChatPesa Payment",
         }
 
@@ -95,15 +97,17 @@ def stk_push_async(order):
             "Content-Type": "application/json",
         }
 
-        requests.post(
+        r = requests.post(
             f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
             json=payload,
             headers=headers,
             timeout=10,
         )
+        print("✅ STK Push Sent:", r.status_code)
+        print(r.text)
 
     except Exception as e:
-        print("STK ERROR:", e)
+        print("❌ STK ERROR:", e)
 
 # ================= WHATSAPP =================
 @app.route("/webhook/whatsapp", methods=["POST"])
@@ -149,9 +153,7 @@ def whatsapp():
         session["step"] = "CONFIRM"
 
         msg.body(
-            f"🧾 Order {order_id}\n"
-            f"Amount: KES {amount}\n\n"
-            f"Reply PAY to receive M-Pesa prompt"
+            f"🧾 Order {order_id}\nAmount: KES {amount}\n\nReply PAY to receive M-Pesa prompt"
         )
 
     elif session["step"] == "CONFIRM" and body.upper() == "PAY":
@@ -174,41 +176,46 @@ def mpesa_callback():
     data = request.json
     cb = data["Body"]["stkCallback"]
 
-    order_id = cb.get("AccountReference")
+    order_id = None
+    receipt = None
+    amount = None
+    phone = None
 
-    if not order_id or order_id not in ORDERS:
-        print("❌ Callback received but order not found")
-        return jsonify({"status": "ignored"})
+    # 🔹 Extract metadata
+    meta = cb.get("CallbackMetadata", {}).get("Item", [])
+    for item in meta:
+        if item["Name"] == "AccountReference":
+            order_id = item["Value"]
+        elif item["Name"] == "MpesaReceiptNumber":
+            receipt = item["Value"]
+        elif item["Name"] == "Amount":
+            amount = item["Value"]
+        elif item["Name"] == "PhoneNumber":
+            phone = str(item["Value"])
 
-    order = ORDERS[order_id]
-
-    if cb["ResultCode"] == 0:
-        meta = cb["CallbackMetadata"]["Item"]
-        receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
-
+    if cb["ResultCode"] == 0 and order_id in ORDERS:
+        order = ORDERS[order_id]
         order["status"] = "PAID"
         order["mpesa_receipt"] = receipt
         order["paid_at"] = now()
 
         send_whatsapp(
             order["phone"],
-            f"✅ Payment successful!\n\n"
-            f"Order: {order_id}\n"
-            f"Amount: KES {order['amount']}\n"
-            f"Receipt: {receipt}\n\nThank you 🙏",
+            f"✅ Payment successful!\n\nOrder: {order_id}\nAmount: KES {order['amount']}\nReceipt: {receipt}\n\nThank you 🙏",
+            delay=1.5,
+        )
+
+    elif cb["ResultCode"] != 0 and order_id in ORDERS:
+        order = ORDERS[order_id]
+        order["status"] = "FAILED"
+        send_whatsapp(
+            order["phone"],
+            f"❌ Payment failed or cancelled.\n\nOrder: {order_id}\nReply PAY to try again.",
             delay=1.5,
         )
 
     else:
-        order["status"] = "FAILED"
-
-        send_whatsapp(
-            order["phone"],
-            f"❌ Payment failed or cancelled.\n\n"
-            f"Order: {order_id}\n"
-            f"You can reply PAY to try again.",
-            delay=1.5,
-        )
+        print("❌ Callback received but order not found:", order_id)
 
     return jsonify({"status": "ok"})
 
