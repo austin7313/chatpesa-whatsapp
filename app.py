@@ -1,157 +1,175 @@
 import os
-import base64
-import requests
+import uuid
+import logging
+from datetime import datetime
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from twilio.twiml.messaging_response import MessagingResponse
 
-# ------------------ APP SETUP ------------------
+# ---------------- CONFIG ----------------
+
+logging.basicConfig(level=logging.INFO)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is required")
+
+MPESA_CALLBACK_URL = os.getenv("MPESA_CALLBACK_URL")  # set in Render
+MPESA_STK_URL = os.getenv("MPESA_STK_URL")            # your STK endpoint
+MPESA_TOKEN = os.getenv("MPESA_TOKEN")                # bearer token
+
+# ---------------- APP ----------------
+
 app = Flask(__name__)
 CORS(app)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# ---------------- DB ----------------
 
-MPESA_CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY")
-MPESA_CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET")
-MPESA_SHORTCODE = os.environ.get("MPESA_SHORTCODE")  # PAYBILL
-MPESA_PASSKEY = os.environ.get("MPESA_PASSKEY")
-MPESA_CALLBACK_URL = os.environ.get("MPESA_CALLBACK_URL")
-
-# ------------------ DB ------------------
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id TEXT PRIMARY KEY,
-            phone TEXT,
-            amount TEXT,
-            status TEXT,
-            mpesa_receipt TEXT,
-            customer_name TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            paid_at TIMESTAMP
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-# ------------------ HELPERS ------------------
-def normalize_msisdn(phone: str) -> str:
-    """
-    Converts:
-    whatsapp:+2547xxxxxxx → 2547xxxxxxx
-    +2547xxxxxxx          → 2547xxxxxxx
-    07xxxxxxxx            → 2547xxxxxxx
-    """
-    phone = phone.replace("whatsapp:", "").replace("+", "").strip()
-    if phone.startswith("0"):
-        phone = "254" + phone[1:]
-    return phone
-
-def mpesa_access_token():
-    url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    r = requests.get(url, auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET), timeout=10)
-    return r.json()["access_token"]
-
-# ------------------ STK PUSH ------------------
-def send_stk_push(phone, amount, order_id):
-    msisdn = normalize_msisdn(phone)
-    print("FINAL MSISDN SENT TO STK:", msisdn)
-
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(
-        f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()
-    ).decode()
-
-    payload = {
-        "BusinessShortCode": MPESA_SHORTCODE,
-        "Password": password,
-        "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": int(amount),
-        "PartyA": msisdn,
-        "PartyB": MPESA_SHORTCODE,
-        "PhoneNumber": msisdn,
-        "CallBackURL": MPESA_CALLBACK_URL,
-        "AccountReference": order_id,
-        "TransactionDesc": "ChatPesa Payment"
-    }
-
-    headers = {
-        "Authorization": f"Bearer {mpesa_access_token()}",
-        "Content-Type": "application/json"
-    }
-
-    r = requests.post(
-        "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-        json=payload,
-        headers=headers,
-        timeout=15
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor,
+        sslmode="require"
     )
 
-    print("STK RESPONSE:", r.status_code, r.text)
-    return r.json()
+def init_db():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id TEXT PRIMARY KEY,
+                    phone TEXT,
+                    customer_name TEXT,
+                    amount INTEGER,
+                    status TEXT,
+                    mpesa_receipt TEXT,
+                    created_at TIMESTAMP,
+                    paid_at TIMESTAMP
+                );
+            """)
+        conn.commit()
 
-# ------------------ ROUTES ------------------
-@app.route("/stk", methods=["POST"])
-def stk():
+init_db()
+
+# ---------------- HELPERS ----------------
+
+def normalize_phone(phone: str) -> str:
+    phone = phone.replace("whatsapp:", "").replace(" ", "")
+    if phone.startswith("+"):
+        return phone
+    if phone.startswith("0"):
+        return "+254" + phone[1:]
+    return "+254" + phone
+
+# ---------------- WHATSAPP ----------------
+
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    body = request.form.get("Body", "").strip()
+    from_phone = normalize_phone(request.form.get("From", ""))
+
+    resp = MessagingResponse()
+    msg = resp.message()
+
+    msg.body(
+        "👋 Hi!\n\n"
+        "Your payment request has been received.\n"
+        "📲 Please check your phone to complete the M-Pesa prompt."
+    )
+
+    return str(resp)
+
+# ---------------- CREATE ORDER ----------------
+
+@app.route("/pay", methods=["POST"])
+def create_payment():
     data = request.json
-    phone = data["phone"]
-    amount = data["amount"]
-    order_id = data["order_id"]
+    phone = normalize_phone(data["phone"])
+    amount = int(data["amount"])
+    name = data.get("name", "Customer")
 
-    try:
-        response = send_stk_push(phone, amount, order_id)
-        return jsonify(response)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    order_id = "CP" + uuid.uuid4().hex[:6].upper()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO orders
+                (id, phone, customer_name, amount, status, created_at)
+                VALUES (%s,%s,%s,%s,'PENDING',%s)
+            """, (
+                order_id,
+                phone,
+                name,
+                amount,
+                datetime.utcnow()
+            ))
+        conn.commit()
+
+    # Trigger STK
+    requests.post(
+        MPESA_STK_URL,
+        headers={"Authorization": f"Bearer {MPESA_TOKEN}"},
+        json={
+            "phone": phone,
+            "amount": amount,
+            "reference": order_id,
+            "callback_url": MPESA_CALLBACK_URL
+        },
+        timeout=10
+    )
+
+    return jsonify({"status": "ok", "order_id": order_id})
+
+# ---------------- MPESA CALLBACK ----------------
 
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
     data = request.json
-    print("MPESA CALLBACK:", data)
 
-    try:
-        result = data["Body"]["stkCallback"]
-        if result["ResultCode"] == 0:
-            meta = {i["Name"]: i.get("Value") for i in result["CallbackMetadata"]["Item"]}
-            receipt = meta.get("MpesaReceiptNumber")
-            paid_at = datetime.now()
-            amount = meta.get("Amount")
-            phone = meta.get("PhoneNumber")
-            order_id = result["CheckoutRequestID"]
+    result = data.get("Body", {}).get("stkCallback", {})
+    code = result.get("ResultCode")
+    meta = result.get("CallbackMetadata", {}).get("Item", [])
 
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE orders
-                SET status='PAID', mpesa_receipt=%s, paid_at=%s
-                WHERE id=%s
-            """, (receipt, paid_at, order_id))
-            conn.commit()
-            conn.close()
+    order_id = next((i["Value"] for i in meta if i["Name"] == "AccountReference"), None)
+    receipt = next((i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber"), None)
 
-    except Exception as e:
-        print("CALLBACK ERROR:", e)
+    if not order_id:
+        return jsonify({"status": "ignored"})
 
-    return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"})
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if code == 0:
+                cur.execute("""
+                    UPDATE orders
+                    SET status='PAID', mpesa_receipt=%s, paid_at=%s
+                    WHERE id=%s
+                """, (receipt, datetime.utcnow(), order_id))
+            else:
+                cur.execute("""
+                    UPDATE orders
+                    SET status='FAILED'
+                    WHERE id=%s
+                """, (order_id,))
+        conn.commit()
+
+    return jsonify({"status": "ok"})
+
+# ---------------- DASHBOARD ----------------
 
 @app.route("/orders", methods=["GET"])
-def orders():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
-    rows = cur.fetchall()
-    conn.close()
+def list_orders():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
+            rows = cur.fetchall()
     return jsonify({"status": "ok", "orders": rows})
 
-# ------------------ START ------------------
+# ---------------- RUN ----------------
+
 if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
