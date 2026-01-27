@@ -28,7 +28,6 @@ TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH")
 TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP")  # e.g., "whatsapp:+1234567890"
 
-# Twilio client
 twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 
 # ================= HELPERS =================
@@ -52,7 +51,7 @@ def mpesa_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ---------------- Postgres connection ----------------
+# ---------------- Postgres ----------------
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
@@ -86,7 +85,6 @@ init_db()
 # ================= STK PUSH =================
 def stk_push_async(order_id):
     try:
-        # Get order from DB
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
@@ -123,20 +121,17 @@ def stk_push_async(order_id):
 def whatsapp():
     body = request.values.get("Body", "").strip()
     phone = request.values.get("From")
-    name = request.values.get("ProfileName", phone)  # fallback to phone
+    name = request.values.get("ProfileName", phone)
 
     resp = MessagingResponse()
     msg = resp.message()
-    session = {}
 
-    # Simulate typing
-    msg.body("")  # required to start Twilio typing
-    time.sleep(1 + len(body)/20)  # human-like delay
+    # Typing indicator delay
+    msg.body("")
+    time.sleep(1 + len(body)/20)
 
-    # --------- Simple flow ---------
     if body == "1":
         msg.body("💰 Enter amount to pay (KES). Minimum: 10")
-        session["step"] = "AMOUNT"
     elif body.isdigit() and int(body) >= 10:
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
         conn = get_db()
@@ -150,7 +145,6 @@ def whatsapp():
         conn.close()
         msg.body(f"🧾 Order ID: {order_id}\nAmount: KES {body}\nReply PAY to complete payment")
     elif body.upper() == "PAY":
-        # fetch last pending order
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT * FROM orders WHERE phone=%s AND status='PENDING' ORDER BY created_at DESC LIMIT 1", (phone,))
@@ -175,13 +169,13 @@ def mpesa_callback():
 
     conn = get_db()
     cur = conn.cursor()
+
     if cb["ResultCode"] == 0:
         meta = cb["CallbackMetadata"]["Item"]
         receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
         phone = str(next(i["Value"] for i in meta if i["Name"] == "PhoneNumber"))
-        amount = next(i["Value"] for i in meta if i["Name"] == "Amount"))
+        amount = next(i["Value"] for i in meta if i["Name"] == "Amount")  # FIXED
 
-        # Update order if matches pending
         cur.execute("""
             UPDATE orders
             SET status='PAID', mpesa_receipt=%s, updated_at=NOW()
@@ -190,7 +184,6 @@ def mpesa_callback():
         """, (receipt, phone, amount))
         updated = cur.fetchone()
         if updated:
-            # send WhatsApp confirmation
             msg_body = f"✅ Payment successful!\nOrder ID: {updated['id']}\nAmount: KES {amount}"
             twilio_client.messages.create(
                 body=msg_body,
@@ -198,9 +191,8 @@ def mpesa_callback():
                 to=updated["phone"]
             )
     else:
-        # Failed payment
         phone = data.get("phone") or "unknown"
-        msg_body = f"❌ Payment failed. Please try again."
+        msg_body = "❌ Payment failed. Please try again."
         twilio_client.messages.create(body=msg_body, from_=TWILIO_WHATSAPP, to=phone)
 
     conn.commit()
@@ -227,4 +219,3 @@ def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
