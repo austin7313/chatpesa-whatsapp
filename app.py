@@ -12,6 +12,7 @@ from flask_cors import CORS
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
+# ================= FLASK SETUP =================
 app = Flask(__name__)
 CORS(app)
 
@@ -22,7 +23,10 @@ CONSUMER_KEY = os.getenv("CONSUMER_KEY", "YOUR_CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET", "YOUR_CONSUMER_SECRET")
 MPESA_BASE = "https://api.safaricom.co.ke"
 CALLBACK_URL = os.getenv("CALLBACK_URL", "https://yourdomain.com/mpesa/callback")
+
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is required!")
 
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH")
@@ -51,7 +55,7 @@ def mpesa_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ---------------- Postgres ----------------
+# ================= POSTGRES =================
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
@@ -110,6 +114,7 @@ def stk_push_async(order_id):
             "AccountReference": order["id"],
             "TransactionDesc": "ChatPesa Payment"
         }
+
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         r = requests.post(f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest", json=payload, headers=headers, timeout=10)
         print("✅ STK STATUS:", r.status_code, r.text)
@@ -126,20 +131,18 @@ def whatsapp():
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Typing indicator delay
-    msg.body("")
+    # Human-like typing delay
     time.sleep(1 + len(body)/20)
 
+    # Basic flow
     if body == "1":
         msg.body("💰 Enter amount to pay (KES). Minimum: 10")
     elif body.isdigit() and int(body) >= 10:
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO orders (id, phone, name, amount)
-            VALUES (%s, %s, %s, %s)
-        """, (order_id, phone, name, int(body)))
+        cur.execute("INSERT INTO orders (id, phone, name, amount) VALUES (%s, %s, %s, %s)",
+                    (order_id, phone, name, int(body)))
         conn.commit()
         cur.close()
         conn.close()
@@ -174,7 +177,7 @@ def mpesa_callback():
         meta = cb["CallbackMetadata"]["Item"]
         receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
         phone = str(next(i["Value"] for i in meta if i["Name"] == "PhoneNumber"))
-        amount = next(i["Value"] for i in meta if i["Name"] == "Amount")  # FIXED
+        amount = next(i["Value"] for i in meta if i["Name"] == "Amount")
 
         cur.execute("""
             UPDATE orders
@@ -185,11 +188,7 @@ def mpesa_callback():
         updated = cur.fetchone()
         if updated:
             msg_body = f"✅ Payment successful!\nOrder ID: {updated['id']}\nAmount: KES {amount}"
-            twilio_client.messages.create(
-                body=msg_body,
-                from_=TWILIO_WHATSAPP,
-                to=updated["phone"]
-            )
+            twilio_client.messages.create(body=msg_body, from_=TWILIO_WHATSAPP, to=updated["phone"])
     else:
         phone = data.get("phone") or "unknown"
         msg_body = "❌ Payment failed. Please try again."
