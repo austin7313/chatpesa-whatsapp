@@ -12,8 +12,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from twilio.rest import Client
 
-# -------------------- CONFIG --------------------
-
+# ---------------- CONFIG ----------------
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 MPESA_CONSUMER_KEY = os.getenv("MPESA_CONSUMER_KEY")
@@ -26,19 +25,18 @@ TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH")
 TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP")
 
+DASHBOARD_KEY = os.getenv("DASHBOARD_KEY")  # simple auth for dashboard
+
 app = Flask(__name__)
 CORS(app)
 
 twilio = Client(TWILIO_SID, TWILIO_AUTH)
 
-# -------------------- DB --------------------
-
+# ---------------- DB ----------------
 @contextmanager
 def get_db():
     conn = psycopg2.connect(
-        DATABASE_URL,
-        sslmode="require",
-        cursor_factory=RealDictCursor
+        DATABASE_URL, sslmode="require", cursor_factory=RealDictCursor
     )
     try:
         yield conn
@@ -49,8 +47,7 @@ def get_db():
     finally:
         conn.close()
 
-# -------------------- HELPERS --------------------
-
+# ---------------- HELPERS ----------------
 def mpesa_token():
     res = requests.get(
         "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
@@ -74,8 +71,53 @@ def send_whatsapp(to, msg):
         body=msg
     )
 
-# -------------------- DB QUERIES --------------------
+# ---------------- FRAUD PROTECTION ----------------
+LAST_STK = {}
 
+def can_request_stk(phone):
+    now_ts = time.time()
+    last = LAST_STK.get(phone, 0)
+    if now_ts - last < 30:
+        return False
+    LAST_STK[phone] = now_ts
+    return True
+
+def safe_mark_paid(checkout_id, amount, receipt):
+    with get_db() as db:
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, phone, name, amount, status
+            FROM orders
+            WHERE checkout_request_id=%s
+        """, (checkout_id,))
+        order = cur.fetchone()
+
+        if not order:
+            return None
+        if order["status"] != "PENDING":
+            return None
+        if int(order["amount"]) != int(amount):
+            return None
+        cur.execute("SELECT 1 FROM orders WHERE mpesa_receipt=%s", (receipt,))
+        if cur.fetchone():
+            return None
+        cur.execute("""
+            UPDATE orders
+            SET status='PAID', mpesa_receipt=%s, updated_at=NOW()
+            WHERE checkout_request_id=%s
+            RETURNING phone, name, amount
+        """, (receipt, checkout_id))
+        return cur.fetchone()
+
+def mark_failed(checkout_id):
+    with get_db() as db:
+        db.cursor().execute("""
+            UPDATE orders
+            SET status='FAILED', updated_at=NOW()
+            WHERE checkout_request_id=%s
+        """, (checkout_id,))
+
+# ---------------- DB OPERATIONS ----------------
 def create_order(order_id, phone, name, amount):
     with get_db() as db:
         db.cursor().execute("""
@@ -83,32 +125,13 @@ def create_order(order_id, phone, name, amount):
             VALUES (%s, %s, %s, %s, 'PENDING')
         """, (order_id, phone, name, amount))
 
-def attach_stk(order_id, checkout, merchant):
+def attach_stk(order_id, checkout_id, merchant_id):
     with get_db() as db:
         db.cursor().execute("""
             UPDATE orders
             SET checkout_request_id=%s, merchant_request_id=%s
             WHERE id=%s
-        """, (checkout, merchant, order_id))
-
-def mark_paid(checkout, receipt):
-    with get_db() as db:
-        cur = db.cursor()
-        cur.execute("""
-            UPDATE orders
-            SET status='PAID', mpesa_receipt=%s, updated_at=NOW()
-            WHERE checkout_request_id=%s
-            RETURNING phone, name, amount
-        """, (receipt, checkout))
-        return cur.fetchone()
-
-def mark_failed(checkout):
-    with get_db() as db:
-        db.cursor().execute("""
-            UPDATE orders
-            SET status='FAILED', updated_at=NOW()
-            WHERE checkout_request_id=%s
-        """, (checkout,))
+        """, (checkout_id, merchant_id, order_id))
 
 def fetch_orders():
     with get_db() as db:
@@ -120,10 +143,11 @@ def fetch_orders():
         """)
         return cur.fetchall()
 
-# -------------------- ROUTES --------------------
-
+# ---------------- ROUTES ----------------
 @app.route("/orders")
 def orders():
+    if request.headers.get("X-API-KEY") != DASHBOARD_KEY:
+        return jsonify({"error": "unauthorized"}), 401
     return jsonify({"status": "ok", "orders": fetch_orders()})
 
 @app.route("/whatsapp", methods=["POST"])
@@ -133,12 +157,15 @@ def whatsapp():
     text = request.form.get("Body", "").strip()
 
     if not text.isdigit():
-        send_whatsapp(phone, "Please enter amount to pay (e.g. 100)")
+        send_whatsapp(phone, "Please enter the amount to pay (e.g., 100)")
+        return "OK"
+
+    if not can_request_stk(phone):
+        send_whatsapp(phone, "Please wait 30 seconds before requesting another payment.")
         return "OK"
 
     amount = int(text)
     order_id = "CP" + uuid.uuid4().hex[:6].upper()
-
     create_order(order_id, phone, name, amount)
 
     password, timestamp = stk_password()
@@ -173,27 +200,24 @@ def whatsapp():
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
     data = request.json["Body"]["stkCallback"]
-    checkout = data["CheckoutRequestID"]
+    checkout_id = data["CheckoutRequestID"]
 
     if data["ResultCode"] == 0:
-        receipt = [
-            i["Value"] for i in data["CallbackMetadata"]["Item"]
-            if i["Name"] == "MpesaReceiptNumber"
-        ][0]
+        items = {i["Name"]: i["Value"] for i in data["CallbackMetadata"]["Item"]}
+        receipt = items["MpesaReceiptNumber"]
+        amount = items["Amount"]
 
-        order = mark_paid(checkout, receipt)
-
+        order = safe_mark_paid(checkout_id, amount, receipt)
         if order:
             send_whatsapp(
                 order["phone"],
                 f"Payment successful ✅\nAmount: KES {order['amount']}\nReceipt: {receipt}"
             )
     else:
-        mark_failed(checkout)
+        mark_failed(checkout_id)
 
     return jsonify({"ok": True})
 
-# -------------------- START --------------------
-
+# ---------------- START ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
