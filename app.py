@@ -3,6 +3,7 @@ import uuid
 import base64
 import datetime
 import threading
+import time
 import requests
 
 from flask import Flask, request, jsonify
@@ -76,10 +77,16 @@ def stk_push_async(order):
     except Exception as e:
         print("❌ STK Push Error:", str(e))
 
+# ================= HUMAN-LIKE DELAY =================
+def human_reply(msg, body, delay=2):
+    """Simulate typing then send message"""
+    time.sleep(delay)
+    msg.body(body)
+
 # ================= WHATSAPP =================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    body = request.form.get("Body", "").strip().upper()
+    body = request.form.get("Body", "").strip()
     phone = request.form.get("From", "").strip()
     resp = MessagingResponse()
     msg = resp.message()
@@ -88,27 +95,27 @@ def whatsapp():
 
     # ----------------- MENU -----------------
     if session["step"] == "START":
-        msg.body("👋 Welcome to ChatPesa!\nReply 1️⃣ to make a payment")
+        human_reply(msg, "👋 Welcome to ChatPesa!\nReply 1️⃣ to make a payment", delay=1.5)
         session["step"] = "MENU"
 
-    elif session["step"] == "MENU" and body == "1":
-        msg.body("💰 Enter amount to pay (KES)\nMinimum: 10")
+    elif session["step"] == "MENU" and body.strip() == "1":
+        human_reply(msg, "💰 Enter amount to pay (KES)\nMinimum: 10", delay=2)
         session["step"] = "AMOUNT"
 
     elif session["step"] == "AMOUNT":
         try:
-            amount = int(body)
+            amount = int(body.strip())
             if amount < 10:
                 raise ValueError
         except:
-            msg.body("❌ Invalid amount. Enter a number ≥ 10")
+            human_reply(msg, "❌ Invalid amount. Enter a number ≥ 10", delay=1.5)
             return str(resp)
 
         order_id = "CP" + uuid.uuid4().hex[:6].upper()
         ORDERS[order_id] = {
             "id": order_id,
             "phone": phone,
-            "customer_name": phone,  # capture WhatsApp number
+            "customer_name": phone,
             "amount": amount,
             "status": "PENDING",
             "created_at": now(),
@@ -117,16 +124,16 @@ def whatsapp():
         }
         session["order_id"] = order_id
         session["step"] = "CONFIRM"
-        msg.body(f"🧾 Order ID: {order_id}\nAmount: KES {amount}\n\nReply PAY to receive M-Pesa prompt")
+        human_reply(msg, f"🧾 Order ID: {order_id}\nAmount: KES {amount}\n\nReply PAY to receive M-Pesa prompt", delay=2.5)
 
-    elif session["step"] == "CONFIRM" and body == "PAY":
+    elif session["step"] == "CONFIRM" and body.strip().upper() == "PAY":
         order = ORDERS.get(session["order_id"])
-        msg.body("📲 Sending M-Pesa prompt. Enter your PIN now…")
+        human_reply(msg, "📲 Sending M-Pesa prompt. Enter your PIN now…", delay=1.5)
         threading.Thread(target=stk_push_async, args=(order,)).start()
         session["step"] = "DONE"
 
     else:
-        msg.body("Reply 1️⃣ to start a payment")
+        human_reply(msg, "Reply 1️⃣ to start a payment", delay=1)
 
     SESSIONS[phone] = session
     return str(resp), 200
@@ -152,11 +159,10 @@ def mpesa_callback():
                 o["paid_at"] = now()
                 order_updated = o
                 break
-
     else:
         # failed transaction
         for o in ORDERS.values():
-            if o["status"] == "PENDING" and o.get("order_id"):
+            if o["status"] == "PENDING":
                 o["status"] = "FAILED"
                 order_updated = o
                 break
