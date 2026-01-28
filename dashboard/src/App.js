@@ -1,109 +1,75 @@
-import React, { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
+import "./App.css";
 
 function App() {
   const [orders, setOrders] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
-  const loadOrders = async () => {
+  const fetchOrders = async () => {
     try {
       const res = await fetch("/orders");
-      if (!res.ok) throw new Error("Failed to fetch orders");
       const data = await res.json();
-      setOrders(data.orders || []);
-      setLoading(false);
+      if (data.status === "ok") {
+        setOrders(data.orders);
+      }
     } catch (err) {
-      setError(err.message);
-      setLoading(false);
+      console.error("Failed to fetch orders:", err);
     }
   };
 
   useEffect(() => {
-    loadOrders();
-    const interval = setInterval(loadOrders, 5000);
+    fetchOrders();
+    const interval = setInterval(fetchOrders, 5000); // refresh every 5s
     return () => clearInterval(interval);
   }, []);
 
-  if (loading) {
-    return <div style={styles.center}>Loading dashboard…</div>;
-  }
-
-  if (error) {
-    return <div style={{ ...styles.center, color: "red" }}>{error}</div>;
-  }
-
   return (
-    <div style={styles.container}>
-      <h1 style={styles.title}>ChatPesa Dashboard</h1>
-
-      <table style={styles.table}>
+    <div className="App">
+      <h1>ChatPesa Dashboard</h1>
+      <table>
         <thead>
           <tr>
-            <th>ID</th>
+            <th>Order ID</th>
+            <th>Customer</th>
             <th>Phone</th>
-            <th>Amount</th>
+            <th>Service 🎯</th>
+            <th>Amount (KES)</th>
+            <th>Receipt 🧾</th>
             <th>Status</th>
-            <th>Mpesa Receipt</th>
-            <th>Created</th>
+            <th>Paid At</th>
           </tr>
         </thead>
         <tbody>
-          {orders.length === 0 && (
+          {orders.length === 0 ? (
             <tr>
-              <td colSpan="6" style={styles.empty}>
+              <td colSpan="8" style={{ textAlign: "center" }}>
                 No orders yet
               </td>
             </tr>
-          )}
-
-          {orders.map((o) => (
-            <tr key={o.id}>
-              <td>{o.id}</td>
-              <td>{o.phone}</td>
-              <td>KES {o.amount}</td>
-              <td
-                style={{
-                  color:
-                    o.status === "PAID"
-                      ? "green"
-                      : o.status === "FAILED"
-                      ? "red"
-                      : "orange",
-                }}
+          ) : (
+            orders.map((order) => (
+              <tr
+                key={order.id}
+                className={order.status === "PAID" ? "paid-row" : ""}
               >
-                {o.status}
-              </td>
-              <td>{o.mpesa_receipt || "-"}</td>
-              <td>{new Date(o.created_at).toLocaleString()}</td>
-            </tr>
-          ))}
+                <td>{order.id}</td>
+                <td>{order.customer_name || "—"}</td>
+                <td>{order.phone}</td>
+                <td>{order.service_requested || "—"}</td>
+                <td>{order.amount}</td>
+                <td>{order.mpesa_receipt || "—"}</td>
+                <td>{order.status}</td>
+                <td>
+                  {order.paid_at
+                    ? new Date(order.paid_at).toLocaleString()
+                    : "—"}
+                </td>
+              </tr>
+            ))
+          )}
         </tbody>
       </table>
     </div>
   );
 }
-
-const styles = {
-  container: {
-    padding: "20px",
-    fontFamily: "Arial, sans-serif",
-  },
-  title: {
-    marginBottom: "20px",
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse",
-  },
-  empty: {
-    textAlign: "center",
-    padding: "20px",
-  },
-  center: {
-    padding: "40px",
-    textAlign: "center",
-    fontFamily: "Arial, sans-serif",
-  },
-};
 
 export default App;
