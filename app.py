@@ -1,170 +1,96 @@
 import os
-import json
-import time
-import requests
+import logging
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
 
+# --------------------
+# App setup
+# --------------------
 app = Flask(__name__)
-CORS(app)
 
-# ----------------------
-# Configuration
-# ----------------------
-DATABASE_URL = os.environ.get("DATABASE_URL")
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")  # e.g., "whatsapp:+14155238886"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is required!")
-if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_NUMBER):
-    raise RuntimeError("Twilio env variables missing!")
-
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-# ----------------------
-# Database helper
-# ----------------------
-def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
-
-def init_db():
-    print("[DB] Initializing database...")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id TEXT PRIMARY KEY,
-            customer_name TEXT,
-            phone TEXT,
-            amount NUMERIC,
-            status TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            paid_at TIMESTAMP,
-            mpesa_receipt TEXT
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("[DB] Database ready.")
-
-# ----------------------
-# Helper functions
-# ----------------------
-def normalize_phone(phone):
-    # Normalize phone to E.164 WhatsApp format
-    phone = phone.replace(" ", "").replace("-", "")
-    if phone.startswith("0"):
-        phone = "+254" + phone[1:]
-    elif not phone.startswith("+"):
-        phone = "+" + phone
-    if not phone.startswith("whatsapp:"):
-        phone = "whatsapp:" + phone
+# --------------------
+# Helpers
+# --------------------
+def normalize_phone(phone: str) -> str:
+    """
+    Normalizes WhatsApp phone numbers
+    Input: 'whatsapp:+254722275271'
+    Output: '+254722275271'
+    """
+    if not phone:
+        return ""
+    phone = phone.replace("whatsapp:", "").strip()
     return phone
 
-def send_whatsapp(to, message):
-    print(f"[TWILIO] Sending WhatsApp to {to}: {message}")
-    try:
-        msg = twilio_client.messages.create(
-            body=message,
-            from_=TWILIO_WHATSAPP_NUMBER,
-            to=to
-        )
-        print(f"[TWILIO] Message SID: {msg.sid}")
-    except Exception as e:
-        print(f"[TWILIO] ERROR sending message: {e}")
+# --------------------
+# Health check
+# --------------------
+@app.route("/", methods=["GET"])
+def health():
+    return "✅ App is running", 200
 
-# ----------------------
-# Routes
-# ----------------------
-@app.route("/orders", methods=["GET"])
-def get_orders():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
-    orders = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify({"status": "ok", "orders": orders})
+# --------------------
+# Test webhook (browser safe)
+# --------------------
+@app.route("/webhook/whatsapp-test", methods=["GET", "POST"])
+def whatsapp_test():
+    logging.info("✅ TEST WEBHOOK HIT")
+    logging.info(f"Method: {request.method}")
+    logging.info(f"Headers: {dict(request.headers)}")
+    logging.info(f"Body: {request.get_data(as_text=True)}")
 
+    return jsonify({
+        "status": "ok",
+        "message": "Test webhook working"
+    }), 200
+
+# --------------------
+# WhatsApp webhook (Twilio)
+# --------------------
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    data = request.get_json(force=True)
-    print("[WEBHOOK] Incoming WhatsApp webhook:", data)
+    try:
+        logging.info("📩 WhatsApp webhook hit")
 
-    phone = normalize_phone(data.get("From", ""))
-    body = data.get("Body", "").strip()
-    print(f"[WEBHOOK] Normalized phone: {phone}, Body: {body}")
+        from_number = normalize_phone(request.form.get("From"))
+        to_number = normalize_phone(request.form.get("To"))
+        body = (request.form.get("Body") or "").strip()
 
-    # Log human typing delay simulation
-    print(f"[WEBHOOK] Simulating typing indicator for 2 seconds...")
-    time.sleep(2)
+        logging.info(f"From: {from_number}")
+        logging.info(f"To: {to_number}")
+        logging.info(f"Message: {body}")
 
-    # Respond
-    response_text = f"Received your message: {body}"
-    send_whatsapp(phone, response_text)
-    print("[WEBHOOK] Response sent.")
+        # --- Build reply ---
+        resp = MessagingResponse()
 
-    return jsonify({"status": "ok"})
+        if not body:
+            resp.message("⚠️ Empty message received.")
+        else:
+            resp.message(
+                "✅ WhatsApp reply working!\n\n"
+                f"You said: *{body}*\n\n"
+                "ChatPesa webhook is alive 🚀"
+            )
 
-@app.route("/webhook/whatsapp-test", methods=["GET"])
-def test_whatsapp():
-    test_data = {
-        "From": "whatsapp:+254722275271",
-        "Body": "hi test"
-    }
-    print("[TEST WEBHOOK] Incoming WhatsApp webhook:", test_data)
-    print(f"[TEST WEBHOOK] Replying to {test_data['From']}: Received your message: {test_data['Body']}")
-    return jsonify({"status": "ok", "message": "Test webhook hit successfully"})
+        # IMPORTANT: Always return 200 + XML
+        return str(resp), 200
 
-# ----------------------
-# STK Push simulation
-# ----------------------
-@app.route("/stk-push", methods=["POST"])
-def stk_push():
-    data = request.get_json(force=True)
-    print("[STK] Incoming STK request:", data)
-    order_id = data.get("order_id")
-    amount = data.get("amount")
-    phone = normalize_phone(data.get("phone", ""))
+    except Exception as e:
+        logging.exception("❌ WhatsApp webhook error")
 
-    # Simulate STK push processing
-    print(f"[STK] Simulating STK push of KES {amount} to {phone} for order {order_id}...")
-    time.sleep(2)
+        # Even on error, RETURN 200 so Twilio doesn't break
+        resp = MessagingResponse()
+        resp.message("⚠️ Temporary error. Please try again.")
+        return str(resp), 200
 
-    # Simulate random success/failure for testing
-    import random
-    success = random.choice([True, False])
-    status = "PAID" if success else "FAILED"
-
-    # Update DB
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE orders SET status=%s, paid_at=NOW() WHERE id=%s",
-        (status, order_id)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"[STK] Order {order_id} marked as {status}")
-
-    # Notify WhatsApp user
-    message = f"Payment {status.lower()} for order {order_id}!"
-    send_whatsapp(phone, message)
-    return jsonify({"status": status})
-
-# ----------------------
-# Start app
-# ----------------------
+# --------------------
+# Render entrypoint
+# --------------------
 if __name__ == "__main__":
-    init_db()
     port = int(os.environ.get("PORT", 5000))
-    print(f"[APP] Starting server on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)
