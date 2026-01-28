@@ -1,197 +1,156 @@
-import os, sys, time, base64, logging, requests
-from datetime import datetime
-from flask import Flask, request, jsonify, Response
+import os
+import logging
+from flask import Flask, request, jsonify
+import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from twilio.rest import Client
-from twilio.twiml.messaging_response import MessagingResponse
 
 # -------------------------
-# APP & LOGGING
+# CONFIG
 # -------------------------
 app = Flask(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-# -------------------------
-# SAFE ENV VAR LOADING
-# -------------------------
-def get_env(name, default=None):
-    value = os.environ.get(name, default)
-    if not value:
-        logging.warning(f"⚠️ Environment variable {name} is not set!")
-    return value
-
-# Twilio
-TWILIO_SID = get_env("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH = get_env("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = get_env("TWILIO_WHATSAPP_NUMBER", "+14155238886")  # default demo number
+logging.basicConfig(level=logging.INFO)
 
 # M-Pesa
-MPESA_CONSUMER_KEY = get_env("MPESA_CONSUMER_KEY")
-MPESA_CONSUMER_SECRET = get_env("MPESA_CONSUMER_SECRET")
-MPESA_SHORTCODE = get_env("MPESA_SHORTCODE")
-MPESA_PASSKEY = get_env("MPESA_PASSKEY")
-MPESA_CALLBACK_URL = get_env("MPESA_CALLBACK_URL")
+MPESA_SHORTCODE = os.environ["MPESA_SHORTCODE"]
+MPESA_PASSKEY = os.environ["MPESA_PASSKEY"]
+MPESA_CONSUMER_KEY = os.environ["MPESA_CONSUMER_KEY"]
+MPESA_CONSUMER_SECRET = os.environ["MPESA_CONSUMER_SECRET"]
+MPESA_CALLBACK_URL = os.environ["MPESA_CALLBACK_URL"]
+MPESA_BASE = "https://api.safaricom.co.ke"
+
+# Twilio WhatsApp
+TWILIO_SID = os.environ["TWILIO_SID"]
+TWILIO_AUTH = os.environ["TWILIO_AUTH"]
+TWILIO_WHATSAPP_NUMBER = os.environ["TWILIO_WHATSAPP_NUMBER"]
+
+# Database
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 # -------------------------
-# TEMP STATE
+# HELPER FUNCTIONS
 # -------------------------
-PENDING = {}  # phone -> {amount, timestamp}
+def get_db():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-# -------------------------
-# HELPERS
-# -------------------------
-def normalize(text):
-    return (text or "").strip().lower()
+def send_whatsapp_payment_status(order_id, success, amount):
+    """
+    Sends WhatsApp message to the user when payment succeeds or fails.
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone, customer_name FROM orders WHERE id=%s", (order_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            logging.warning(f"Order {order_id} not found for WhatsApp notification")
+            return
 
-def normalize_phone(phone):
-    phone = phone.replace("whatsapp:", "").replace("+", "")
-    if phone.startswith("0"):
-        phone = "254" + phone[1:]
-    return phone
-
-def parse_amount(text):
-    import re
-    m = re.search(r"pay\s*(\d+)", text)
-    return int(m.group(1)) if m else None
-
-def get_mpesa_token():
-    if not MPESA_CONSUMER_KEY or not MPESA_CONSUMER_SECRET:
-        logging.error("M-Pesa credentials not set")
-        return None
-    r = requests.get(
-        "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
-        auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET),
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-def stk_push(phone, amount):
-    token = get_mpesa_token()
-    if not token:
-        return None
-    phone = normalize_phone(phone)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(
-        f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()
-    ).decode()
-
-    payload = {
-        "BusinessShortCode": MPESA_SHORTCODE,
-        "Password": password,
-        "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": int(amount),
-        "PartyA": phone,
-        "PartyB": MPESA_SHORTCODE,
-        "PhoneNumber": phone,
-        "CallBackURL": MPESA_CALLBACK_URL,
-        "AccountReference": "ChatPesa",
-        "TransactionDesc": "ChatPesa Payment",
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    r = requests.post(
-        "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-        json=payload,
-        headers=headers,
-        timeout=10,
-    )
-    logging.info(f"STK PUSH RESPONSE: {r.text}")
-    return r.json()
-
-def send_whatsapp(phone, message):
-    if not TWILIO_SID or not TWILIO_AUTH or not TWILIO_WHATSAPP_NUMBER:
-        logging.warning("Twilio credentials missing, cannot send WhatsApp message")
-        return
-    phone = normalize_phone(phone)
-    client = Client(TWILIO_SID, TWILIO_AUTH)
-    client.messages.create(
-        from_="whatsapp:" + TWILIO_WHATSAPP_NUMBER,
-        to="whatsapp:" + phone,
-        body=message,
-    )
+        phone, customer_name = row
+        phone = phone.replace("whatsapp:", "").replace("+", "")
+        client = Client(TWILIO_SID, TWILIO_AUTH)
+        message = f"Hello {customer_name}, your payment of KES {amount} was "
+        message += "successful ✅" if success else "not successful ❌"
+        client.messages.create(
+            body=message,
+            from_="whatsapp:" + TWILIO_WHATSAPP_NUMBER,
+            to="whatsapp:+{}".format(phone)
+        )
+        logging.info(f"WhatsApp sent to {phone}: {message}")
+    except Exception as e:
+        logging.exception("Failed to send WhatsApp payment status")
 
 # -------------------------
-# HEALTH CHECK
+# DASHBOARD ROUTE
 # -------------------------
-@app.route("/health")
-def health():
-    return "OK", 200
+@app.route("/orders", methods=["GET"])
+def get_orders():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, customer_name, phone, amount, status, created_at, paid_at, mpesa_receipt
+            FROM orders
+            ORDER BY created_at DESC
+        """)
+        orders = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify({"orders": orders, "status": "ok"})
+    except Exception as e:
+        logging.exception("Failed to fetch orders")
+        return jsonify({"error": str(e)}), 500
 
 # -------------------------
 # WHATSAPP WEBHOOK
 # -------------------------
 @app.route("/webhook/whatsapp", methods=["POST"])
-def whatsapp():
-    body = request.values.get("Body", "")
-    sender = request.values.get("From", "")
-    phone = normalize_phone(sender)
-
-    logging.info(f"WhatsApp from {phone}: {body}")
-    msg = normalize(body)
-    resp = MessagingResponse()
-
-    if msg in ["hi", "hello", "hey", "start"]:
-        resp.message("👋 Hi! Type *pay 100* to pay.")
-        return Response(str(resp), mimetype="application/xml")
-
-    amount = parse_amount(msg)
-    if amount:
-        PENDING[phone] = {"amount": amount, "time": time.time()}
-        resp.message(f"💳 Amount KES {amount}\nReply *YES* to confirm or *NO* to cancel.")
-        return Response(str(resp), mimetype="application/xml")
-
-    if msg == "yes" and phone in PENDING:
-        amount = PENDING[phone]["amount"]
-        stk_push(phone, amount)
-        resp.message("📲 STK sent. Enter your M-Pesa PIN.")
-        return Response(str(resp), mimetype="application/xml")
-
-    if msg == "no":
-        PENDING.pop(phone, None)
-        resp.message("❌ Payment cancelled.")
-        return Response(str(resp), mimetype="application/xml")
-
-    resp.message("❓ Try *pay 100*")
-    return Response(str(resp), mimetype="application/xml")
+def whatsapp_webhook():
+    data = request.form
+    from_number = data.get("From")
+    body = data.get("Body")
+    logging.info(f"WhatsApp message from {from_number}: {body}")
+    # Here you could trigger a payment prompt
+    return "OK", 200
 
 # -------------------------
-# MPESA CALLBACK
+# M-PESA CALLBACK
 # -------------------------
-@app.route("/webhook/mpesa", methods=["POST"])
+@app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
-    data = request.json
+    data = request.get_json()
     logging.info(f"MPESA CALLBACK: {data}")
 
-    cb = data.get("Body", {}).get("stkCallback", {})
-    result_code = cb.get("ResultCode")
-    metadata_items = cb.get("CallbackMetadata", {}).get("Item", [])
+    try:
+        body = data.get("Body", {}).get("stkCallback", {})
+        checkout_request_id = body.get("CheckoutRequestID")
+        result_code = body.get("ResultCode")
+        metadata = body.get("CallbackMetadata", {}).get("Item", [])
 
-    phone = None
-    if metadata_items:
-        for item in metadata_items:
-            if item.get("Name") == "PhoneNumber":
-                phone = str(item.get("Value"))
+        amount = None
+        mpesa_receipt = None
+        for item in metadata:
+            if item.get("Name") == "Amount":
+                amount = item.get("Value")
+            elif item.get("Name") == "MpesaReceiptNumber":
+                mpesa_receipt = item.get("Value")
 
-    if phone and result_code == 0:
-        send_whatsapp(phone, "✅ Payment successful. Thank you!")
-        PENDING.pop(phone, None)
-    elif phone:
-        send_whatsapp(phone, "❌ Payment failed. Try again.")
+        conn = get_db()
+        cur = conn.cursor()
+        if result_code == 0:
+            cur.execute(
+                "UPDATE orders SET status=%s, paid_at=NOW(), mpesa_receipt=%s WHERE id=%s",
+                ("PAID", mpesa_receipt, checkout_request_id)
+            )
+            conn.commit()
+            send_whatsapp_payment_status(checkout_request_id, True, amount)
+        else:
+            cur.execute(
+                "UPDATE orders SET status=%s WHERE id=%s",
+                ("FAILED", checkout_request_id)
+            )
+            conn.commit()
+            send_whatsapp_payment_status(checkout_request_id, False, amount)
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logging.exception("Failed to process MPESA callback")
 
-    return jsonify({"ok": True})
+    return jsonify({"status": "ok"})
 
 # -------------------------
-# RUN
+# HEALTH CHECK
+# -------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
+# -------------------------
+# RUN APP
 # -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    logging.info("Starting ChatPesa app...")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
