@@ -6,26 +6,25 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
+# -------------------------# -------------------------
+# ENV / CREDENTIALS (SAFE)
 # -------------------------
-# LOGGING
-# -------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+def get_env(name):
+    value = os.environ.get(name)
+    if not value:
+        logging.error(f"❌ Environment variable {name} is not set!")
+        sys.exit(1)
+    return value
 
-# -------------------------
-# ENV / CREDENTIALS
-# -------------------------
-MPESA_CONSUMER_KEY = os.environ["MPESA_CONSUMER_KEY"]
-MPESA_CONSUMER_SECRET = os.environ["MPESA_CONSUMER_SECRET"]
-MPESA_SHORTCODE = os.environ["MPESA_SHORTCODE"]
-MPESA_PASSKEY = os.environ["MPESA_PASSKEY"]
-MPESA_CALLBACK_URL = os.environ["MPESA_CALLBACK_URL"]  # MUST match /webhook/mpesa
-TWILIO_SID = os.environ["TWILIO_SID"]
-TWILIO_AUTH = os.environ["TWILIO_AUTH"]
-TWILIO_WHATSAPP_NUMBER = os.environ["TWILIO_WHATSAPP_NUMBER"]
+MPESA_CONSUMER_KEY = get_env("MPESA_CONSUMER_KEY")
+MPESA_CONSUMER_SECRET = get_env("MPESA_CONSUMER_SECRET")
+MPESA_SHORTCODE = get_env("MPESA_SHORTCODE")
+MPESA_PASSKEY = get_env("MPESA_PASSKEY")
+MPESA_CALLBACK_URL = get_env("MPESA_CALLBACK_URL")  # must match /webhook/mpesa
+
+TWILIO_SID = get_env("TWILIO_SID")
+TWILIO_AUTH = get_env("TWILIO_AUTH")
+TWILIO_WHATSAPP_NUMBER = get_env("TWILIO_WHATSAPP_NUMBER")
 
 # -------------------------
 # IN-MEMORY STATE (TEMP)
