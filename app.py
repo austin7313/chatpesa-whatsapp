@@ -17,22 +17,23 @@ logging.basicConfig(
 # -------------------------
 # SAFE ENV VAR LOADING
 # -------------------------
-def get_env(name):
-    value = os.environ.get(name)
+def get_env(name, default=None):
+    value = os.environ.get(name, default)
     if not value:
-        logging.error(f"❌ Environment variable {name} is not set!")
-        sys.exit(1)
+        logging.warning(f"⚠️ Environment variable {name} is not set!")
     return value
 
+# Twilio
+TWILIO_SID = get_env("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH = get_env("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = get_env("TWILIO_WHATSAPP_NUMBER", "+14155238886")  # default demo number
+
+# M-Pesa
 MPESA_CONSUMER_KEY = get_env("MPESA_CONSUMER_KEY")
 MPESA_CONSUMER_SECRET = get_env("MPESA_CONSUMER_SECRET")
 MPESA_SHORTCODE = get_env("MPESA_SHORTCODE")
 MPESA_PASSKEY = get_env("MPESA_PASSKEY")
-MPESA_CALLBACK_URL = get_env("MPESA_CALLBACK_URL")  # must match /webhook/mpesa
-
-TWILIO_SID = get_env("TWILIO_SID")
-TWILIO_AUTH = get_env("TWILIO_AUTH")
-TWILIO_WHATSAPP_NUMBER = get_env("TWILIO_WHATSAPP_NUMBER")
+MPESA_CALLBACK_URL = get_env("MPESA_CALLBACK_URL")
 
 # -------------------------
 # TEMP STATE
@@ -57,6 +58,9 @@ def parse_amount(text):
     return int(m.group(1)) if m else None
 
 def get_mpesa_token():
+    if not MPESA_CONSUMER_KEY or not MPESA_CONSUMER_SECRET:
+        logging.error("M-Pesa credentials not set")
+        return None
     r = requests.get(
         "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
         auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET),
@@ -66,6 +70,9 @@ def get_mpesa_token():
     return r.json()["access_token"]
 
 def stk_push(phone, amount):
+    token = get_mpesa_token()
+    if not token:
+        return None
     phone = normalize_phone(phone)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     password = base64.b64encode(
@@ -87,7 +94,7 @@ def stk_push(phone, amount):
     }
 
     headers = {
-        "Authorization": f"Bearer {get_mpesa_token()}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -101,6 +108,9 @@ def stk_push(phone, amount):
     return r.json()
 
 def send_whatsapp(phone, message):
+    if not TWILIO_SID or not TWILIO_AUTH or not TWILIO_WHATSAPP_NUMBER:
+        logging.warning("Twilio credentials missing, cannot send WhatsApp message")
+        return
     phone = normalize_phone(phone)
     client = Client(TWILIO_SID, TWILIO_AUTH)
     client.messages.create(
