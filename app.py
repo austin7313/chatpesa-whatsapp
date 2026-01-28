@@ -1,243 +1,156 @@
 import os
 import json
-import base64
-import logging
-import requests
+from datetime import datetime
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
+import requests
 
-# ------------------------------------------------------------------
-# BASIC APP SETUP
-# ------------------------------------------------------------------
+# =======================
+# Environment variables
+# =======================
+DATABASE_URL = os.environ.get("DATABASE_URL")
+TWILIO_SID = os.environ.get("TWILIO_SID")
+TWILIO_AUTH = os.environ.get("TWILIO_AUTH")
+TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
 
-app = Flask(__name__, static_folder=None)
-CORS(app)
-logging.basicConfig(level=logging.INFO)
-
-PORT = int(os.environ.get("PORT", 5000))
-
-# ------------------------------------------------------------------
-# ENVIRONMENT VARIABLES (SAFE READ)
-# ------------------------------------------------------------------
-
-def must_get(key):
-    val = os.environ.get(key)
-    if not val:
-        logging.error(f"❌ Missing environment variable: {key}")
-        raise RuntimeError(f"Missing environment variable: {key}")
-    return val
-
-DATABASE_URL = must_get("DATABASE_URL")
-
-MPESA_SHORTCODE = must_get("MPESA_SHORTCODE")
-MPESA_PASSKEY = must_get("MPESA_PASSKEY")
-MPESA_CONSUMER_KEY = must_get("MPESA_CONSUMER_KEY")
-MPESA_CONSUMER_SECRET = must_get("MPESA_CONSUMER_SECRET")
-MPESA_CALLBACK_URL = must_get("MPESA_CALLBACK_URL")
+MPESA_CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY")
+MPESA_CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET")
+MPESA_SHORTCODE = os.environ.get("MPESA_SHORTCODE")
+MPESA_PASSKEY = os.environ.get("MPESA_PASSKEY")
+MPESA_CALLBACK_URL = os.environ.get("MPESA_CALLBACK_URL")
 MPESA_BASE = "https://api.safaricom.co.ke"
 
-TWILIO_SID = must_get("TWILIO_SID")
-TWILIO_AUTH = must_get("TWILIO_AUTH")
-TWILIO_WHATSAPP_NUMBER = must_get("TWILIO_WHATSAPP_NUMBER")
+# =======================
+# Flask & CORS
+# =======================
+app = Flask(__name__)
+CORS(app)
 
-# ------------------------------------------------------------------
-# DATABASE
-# ------------------------------------------------------------------
+# =======================
+# Twilio Client
+# =======================
+twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 
+# =======================
+# Database helpers
+# =======================
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
 
 def init_db():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS orders (
-                    id TEXT PRIMARY KEY,
-                    customer_name TEXT,
-                    phone TEXT,
-                    amount INTEGER,
-                    status TEXT,
-                    mpesa_receipt TEXT,
-                    created_at TIMESTAMP,
-                    paid_at TIMESTAMP
-                )
-            """)
-        conn.commit()
-    logging.info("✅ Database ready")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            customer_name TEXT,
+            phone TEXT,
+            amount NUMERIC,
+            service_requested TEXT,
+            status TEXT,
+            mpesa_receipt TEXT,
+            created_at TIMESTAMP,
+            paid_at TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-# ------------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------------
-
+# =======================
+# Normalize phone numbers
+# =======================
 def normalize_phone(phone):
-    phone = phone.replace("whatsapp:", "").replace(" ", "")
-    if phone.startswith("0"):
-        phone = "254" + phone[1:]
-    if phone.startswith("+"):
-        phone = phone[1:]
-    return phone
+    phone = phone.replace(" ", "").replace("-", "")
+    if phone.startswith("+254"):
+        return phone
+    elif phone.startswith("0"):
+        return "+254" + phone[1:]
+    else:
+        return phone  # assume already normalized
 
-def mpesa_access_token():
-    auth = base64.b64encode(
-        f"{MPESA_CONSUMER_KEY}:{MPESA_CONSUMER_SECRET}".encode()
-    ).decode()
-
-    r = requests.get(
-        f"{MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials",
-        headers={"Authorization": f"Basic {auth}"}
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-# ------------------------------------------------------------------
-# MPESA STK PUSH
-# ------------------------------------------------------------------
-
-def send_stk_push(phone, amount, order_id):
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode(
-        f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()
-    ).decode()
-
-    payload = {
-        "BusinessShortCode": MPESA_SHORTCODE,
-        "Password": password,
-        "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
-        "PartyA": phone,
-        "PartyB": MPESA_SHORTCODE,
-        "PhoneNumber": phone,
-        "CallBackURL": MPESA_CALLBACK_URL,
-        "AccountReference": order_id,
-        "TransactionDesc": f"Payment {order_id}"
-    }
-
-    token = mpesa_access_token()
-
-    r = requests.post(
-        f"{MPESA_BASE}/mpesa/stkpush/v1/processrequest",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        },
-        json=payload,
-        timeout=20
-    )
-
-    logging.info(f"📲 STK response: {r.text}")
-    return r.json()
-
-# ------------------------------------------------------------------
-# WHATSAPP WEBHOOK
-# ------------------------------------------------------------------
+# =======================
+# Routes
+# =======================
+@app.route("/orders", methods=["GET"])
+def get_orders():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
+    orders = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "ok", "orders": orders})
 
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    incoming = request.values.get("Body", "").strip().lower()
-    sender = request.values.get("From", "")
-    phone = normalize_phone(sender)
+    data = request.form or request.json
+    phone = normalize_phone(data.get("From", ""))
+    body = data.get("Body", "").lower()
 
-    resp = MessagingResponse()
-    msg = resp.message()
+    # Example: Place order via WhatsApp
+    if "order" in body:
+        order_id = f"CP{int(datetime.utcnow().timestamp())}"
+        customer_name = body.split()[1] if len(body.split()) > 1 else "Customer"
+        amount = 10  # Example default
+        service_requested = "Example item"  # Replace parsing logic if needed
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO orders (id, customer_name, phone, amount, service_requested, status, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (order_id, customer_name, phone, amount, service_requested, "PENDING", datetime.utcnow()),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
-    if incoming.isdigit():
-        amount = int(incoming)
-        order_id = f"CP{datetime.now().strftime('%H%M%S%f')[:8]}"
+        twilio_client.messages.create(
+            from_="whatsapp:" + TWILIO_WHATSAPP_NUMBER,
+            body=f"Thanks {customer_name}, your order {order_id} has been received. You'll get a payment link shortly.",
+            to=phone,
+        )
+        return jsonify({"status": "ok", "message": "Order received"})
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO orders
-                    (id, customer_name, phone, amount, status, created_at)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                """, (
-                    order_id,
-                    "WhatsApp User",
-                    f"whatsapp:+{phone}",
-                    amount,
-                    "PENDING",
-                    datetime.utcnow()
-                ))
-            conn.commit()
-
-        send_stk_push(phone, amount, order_id)
-        msg.body(f"📲 Payment request sent.\nEnter your M-Pesa PIN to pay KES {amount}.")
-    else:
-        msg.body("Send the amount (e.g. 100) to pay via M-Pesa.")
-
-    return str(resp)
-
-# ------------------------------------------------------------------
-# MPESA CALLBACK
-# ------------------------------------------------------------------
+    return jsonify({"status": "ok", "message": "No action taken"})
 
 @app.route("/mpesa/callback", methods=["POST"])
 def mpesa_callback():
     data = request.json
-    logging.info(f"💰 MPESA CALLBACK: {json.dumps(data)}")
+    stk_callback = data.get("Body", {}).get("stkCallback", {})
 
-    try:
-        stk = data["Body"]["stkCallback"]
-        if stk["ResultCode"] != 0:
-            return jsonify({"status": "failed"})
+    if stk_callback.get("ResultCode") == 0:  # Payment successful
+        checkout_request_id = stk_callback.get("CheckoutRequestID")
+        amount = stk_callback.get("CallbackMetadata", {}).get("Item", [{}])[0].get("Value", 0)
+        receipt = next((i["Value"] for i in stk_callback.get("CallbackMetadata", {}).get("Item", []) if i["Name"] == "MpesaReceiptNumber"), "")
+        phone = normalize_phone(next((i["Value"] for i in stk_callback.get("CallbackMetadata", {}).get("Item", []) if i["Name"] == "PhoneNumber"), ""))
 
-        meta = stk["CallbackMetadata"]["Item"]
-        receipt = next(i["Value"] for i in meta if i["Name"] == "MpesaReceiptNumber")
-        amount = int(next(i["Value"] for i in meta if i["Name"] == "Amount"))
+        # Update order in DB
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE orders SET status=%s, mpesa_receipt=%s, paid_at=%s WHERE phone=%s AND status=%s ORDER BY created_at DESC LIMIT 1",
+            ("PAID", receipt, datetime.utcnow(), phone, "PENDING"),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
-        order_id = stk["CheckoutRequestID"]
+        # Send WhatsApp confirmation
+        twilio_client.messages.create(
+            from_="whatsapp:" + TWILIO_WHATSAPP_NUMBER,
+            body=f"🎉 Payment received successfully! Receipt: {receipt}. Thank you for your order.",
+            to=phone,
+        )
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE orders
-                    SET status='PAID',
-                        mpesa_receipt=%s,
-                        paid_at=%s
-                    WHERE amount=%s AND status='PENDING'
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """, (receipt, datetime.utcnow(), amount))
-            conn.commit()
+    return jsonify({"status": "ok"})
 
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        logging.exception("❌ Callback error")
-        return jsonify({"error": str(e)}), 500
-
-# ------------------------------------------------------------------
-# ORDERS API (DASHBOARD)
-# ------------------------------------------------------------------
-
-@app.route("/orders")
-def orders():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
-            rows = cur.fetchall()
-    return jsonify({"status": "ok", "orders": rows})
-
-# ------------------------------------------------------------------
-# SERVE REACT DASHBOARD
-# ------------------------------------------------------------------
-
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>")
-def serve_dashboard(path):
-    build_dir = os.path.join("dashboard", "build")
-    if path and os.path.exists(os.path.join(build_dir, path)):
-        return send_from_directory(build_dir, path)
-    return send_from_directory(build_dir, "index.html")
-
-# ------------------------------------------------------------------
-# STARTUP
-# ------------------------------------------------------------------
-
+# =======================
+# Main
+# =======================
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
