@@ -4,10 +4,18 @@ from flask import Flask, request, jsonify, Response
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
+# -------------------------
+# APP & LOGGING
+# -------------------------
 app = Flask(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-# -------------------------# -------------------------
-# ENV / CREDENTIALS (SAFE)
+# -------------------------
+# SAFE ENV VAR LOADING
 # -------------------------
 def get_env(name):
     value = os.environ.get(name)
@@ -27,7 +35,7 @@ TWILIO_AUTH = get_env("TWILIO_AUTH")
 TWILIO_WHATSAPP_NUMBER = get_env("TWILIO_WHATSAPP_NUMBER")
 
 # -------------------------
-# IN-MEMORY STATE (TEMP)
+# TEMP STATE
 # -------------------------
 PENDING = {}  # phone -> {amount, timestamp}
 
@@ -102,7 +110,7 @@ def send_whatsapp(phone, message):
     )
 
 # -------------------------
-# HEALTH
+# HEALTH CHECK
 # -------------------------
 @app.route("/health")
 def health():
@@ -159,7 +167,6 @@ def mpesa_callback():
 
     phone = None
     if metadata_items:
-        # Safaricom always returns PhoneNumber somewhere in CallbackMetadata
         for item in metadata_items:
             if item.get("Name") == "PhoneNumber":
                 phone = str(item.get("Value"))
