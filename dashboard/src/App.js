@@ -1,77 +1,109 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-import "./App.css";
-
-const API_URL = "https://chatpesa-whatsapp.onrender.com"; // <-- Your Flask backend
 
 function App() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // Fetch orders from backend
-  const fetchOrders = async () => {
+  const loadOrders = async () => {
     try {
-      const res = await axios.get(`${API_URL}/orders`);
-      if (res.data && res.data.orders) {
-        setOrders(res.data.orders);
-      }
+      const res = await fetch("/orders");
+      if (!res.ok) throw new Error("Failed to fetch orders");
+      const data = await res.json();
+      setOrders(data.orders || []);
       setLoading(false);
-    } catch (error) {
-      console.error("Error fetching orders:", error);
+    } catch (err) {
+      setError(err.message);
       setLoading(false);
     }
   };
 
-  // Auto-refresh every 5 seconds
   useEffect(() => {
-    fetchOrders();
-    const interval = setInterval(fetchOrders, 5000);
+    loadOrders();
+    const interval = setInterval(loadOrders, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  if (loading) {
+    return <div style={styles.center}>Loading dashboard…</div>;
+  }
+
+  if (error) {
+    return <div style={{ ...styles.center, color: "red" }}>{error}</div>;
+  }
+
   return (
-    <div className="App">
-      <header className="App-header">
-        <h1>ChatPesa Dashboard</h1>
-      </header>
-      <main>
-        {loading ? (
-          <p>Loading orders...</p>
-        ) : orders.length === 0 ? (
-          <p>No orders found</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Customer</th>
-                <th>Phone</th>
-                <th>Amount</th>
-                <th>Status</th>
-                <th>MPESA Receipt</th>
-                <th>Created At</th>
-                <th>Paid At</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((order) => (
-                <tr key={order.id}>
-                  <td>{order.id}</td>
-                  <td>{order.customer_name}</td>
-                  <td>{order.phone}</td>
-                  <td>{order.amount}</td>
-                  <td>{order.status}</td>
-                  <td>{order.mpesa_receipt || "—"}</td>
-                  <td>{order.created_at}</td>
-                  <td>{order.paid_at || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </main>
+    <div style={styles.container}>
+      <h1 style={styles.title}>ChatPesa Dashboard</h1>
+
+      <table style={styles.table}>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Phone</th>
+            <th>Amount</th>
+            <th>Status</th>
+            <th>Mpesa Receipt</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.length === 0 && (
+            <tr>
+              <td colSpan="6" style={styles.empty}>
+                No orders yet
+              </td>
+            </tr>
+          )}
+
+          {orders.map((o) => (
+            <tr key={o.id}>
+              <td>{o.id}</td>
+              <td>{o.phone}</td>
+              <td>KES {o.amount}</td>
+              <td
+                style={{
+                  color:
+                    o.status === "PAID"
+                      ? "green"
+                      : o.status === "FAILED"
+                      ? "red"
+                      : "orange",
+                }}
+              >
+                {o.status}
+              </td>
+              <td>{o.mpesa_receipt || "-"}</td>
+              <td>{new Date(o.created_at).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
+
+const styles = {
+  container: {
+    padding: "20px",
+    fontFamily: "Arial, sans-serif",
+  },
+  title: {
+    marginBottom: "20px",
+  },
+  table: {
+    width: "100%",
+    borderCollapse: "collapse",
+  },
+  empty: {
+    textAlign: "center",
+    padding: "20px",
+  },
+  center: {
+    padding: "40px",
+    textAlign: "center",
+    fontFamily: "Arial, sans-serif",
+  },
+};
 
 export default App;
