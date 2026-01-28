@@ -1,96 +1,68 @@
-import os
+from flask import Flask, request, Response
 import logging
-from flask import Flask, request, jsonify
+import sys
+import os
 from twilio.twiml.messaging_response import MessagingResponse
 
-# --------------------
-# App setup
-# --------------------
 app = Flask(__name__)
 
+# -------------------------
+# LOGGING (CRITICAL)
+# -------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    stream=sys.stdout,
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-# --------------------
-# Helpers
-# --------------------
-def normalize_phone(phone: str) -> str:
-    """
-    Normalizes WhatsApp phone numbers
-    Input: 'whatsapp:+254722275271'
-    Output: '+254722275271'
-    """
-    if not phone:
-        return ""
-    phone = phone.replace("whatsapp:", "").strip()
-    return phone
-
-# --------------------
-# Health check
-# --------------------
-@app.route("/", methods=["GET"])
-def health():
-    return "✅ App is running", 200
-
-# --------------------
-# Test webhook (browser safe)
-# --------------------
-@app.route("/webhook/whatsapp-test", methods=["GET", "POST"])
-def whatsapp_test():
-    logging.info("✅ TEST WEBHOOK HIT")
+@app.before_request
+def log_request():
+    logging.info("---- INCOMING REQUEST ----")
     logging.info(f"Method: {request.method}")
+    logging.info(f"URL: {request.url}")
     logging.info(f"Headers: {dict(request.headers)}")
     logging.info(f"Body: {request.get_data(as_text=True)}")
 
-    return jsonify({
-        "status": "ok",
-        "message": "Test webhook working"
-    }), 200
+@app.after_request
+def log_response(response):
+    logging.info("---- OUTGOING RESPONSE ----")
+    logging.info(f"Status: {response.status}")
+    logging.info(f"Body: {response.get_data(as_text=True)}")
+    return response
 
-# --------------------
-# WhatsApp webhook (Twilio)
-# --------------------
+
+# -------------------------
+# HEALTH CHECK (TEST THIS FIRST)
+# -------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK - App is running", 200
+
+
+# -------------------------
+# WHATSAPP WEBHOOK
+# -------------------------
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     try:
-        logging.info("📩 WhatsApp webhook hit")
+        incoming_msg = request.values.get("Body", "").strip()
+        from_number = request.values.get("From", "")
 
-        from_number = normalize_phone(request.form.get("From"))
-        to_number = normalize_phone(request.form.get("To"))
-        body = (request.form.get("Body") or "").strip()
+        logging.info(f"WhatsApp message from {from_number}: {incoming_msg}")
 
-        logging.info(f"From: {from_number}")
-        logging.info(f"To: {to_number}")
-        logging.info(f"Message: {body}")
-
-        # --- Build reply ---
         resp = MessagingResponse()
+        resp.message("Webhook alive ✅ Message received.")
 
-        if not body:
-            resp.message("⚠️ Empty message received.")
-        else:
-            resp.message(
-                "✅ WhatsApp reply working!\n\n"
-                f"You said: *{body}*\n\n"
-                "ChatPesa webhook is alive 🚀"
-            )
-
-        # IMPORTANT: Always return 200 + XML
-        return str(resp), 200
+        return Response(str(resp), mimetype="application/xml")
 
     except Exception as e:
-        logging.exception("❌ WhatsApp webhook error")
+        logging.exception("WHATSAPP WEBHOOK ERROR")
+        return Response("Internal Server Error", status=500)
 
-        # Even on error, RETURN 200 so Twilio doesn't break
-        resp = MessagingResponse()
-        resp.message("⚠️ Temporary error. Please try again.")
-        return str(resp), 200
 
-# --------------------
-# Render entrypoint
-# --------------------
+# -------------------------
+# RENDER PORT BINDING
+# -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
