@@ -1,7 +1,8 @@
-from flask import Flask, request, Response, jsonify
-from twilio.twiml.messaging_response import MessagingResponse
-import logging, os, sys, time, base64, requests, re
+import os, sys, time, base64, logging, requests
 from datetime import datetime
+from flask import Flask, request, jsonify, Response
+from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
@@ -11,23 +12,25 @@ app = Flask(__name__)
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stdout,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 # -------------------------
-# ENV
+# ENV / CREDENTIALS
 # -------------------------
 MPESA_CONSUMER_KEY = os.environ["MPESA_CONSUMER_KEY"]
 MPESA_CONSUMER_SECRET = os.environ["MPESA_CONSUMER_SECRET"]
 MPESA_SHORTCODE = os.environ["MPESA_SHORTCODE"]
 MPESA_PASSKEY = os.environ["MPESA_PASSKEY"]
-MPESA_CALLBACK_URL = os.environ["MPESA_CALLBACK_URL"]
+MPESA_CALLBACK_URL = os.environ["MPESA_CALLBACK_URL"]  # MUST match /webhook/mpesa
+TWILIO_SID = os.environ["TWILIO_SID"]
+TWILIO_AUTH = os.environ["TWILIO_AUTH"]
+TWILIO_WHATSAPP_NUMBER = os.environ["TWILIO_WHATSAPP_NUMBER"]
 
 # -------------------------
 # IN-MEMORY STATE (TEMP)
-# phone -> {amount, timestamp}
 # -------------------------
-PENDING = {}
+PENDING = {}  # phone -> {amount, timestamp}
 
 # -------------------------
 # HELPERS
@@ -35,30 +38,39 @@ PENDING = {}
 def normalize(text):
     return (text or "").strip().lower()
 
+def normalize_phone(phone):
+    phone = phone.replace("whatsapp:", "").replace("+", "")
+    if phone.startswith("0"):
+        phone = "254" + phone[1:]
+    return phone
+
 def parse_amount(text):
+    import re
     m = re.search(r"pay\s*(\d+)", text)
     return int(m.group(1)) if m else None
 
-def mpesa_token():
+def get_mpesa_token():
     r = requests.get(
         "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
         auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET),
         timeout=10,
     )
+    r.raise_for_status()
     return r.json()["access_token"]
 
 def stk_push(phone, amount):
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    phone = normalize_phone(phone)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     password = base64.b64encode(
-        f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{ts}".encode()
+        f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()
     ).decode()
 
     payload = {
         "BusinessShortCode": MPESA_SHORTCODE,
         "Password": password,
-        "Timestamp": ts,
+        "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
+        "Amount": int(amount),
         "PartyA": phone,
         "PartyB": MPESA_SHORTCODE,
         "PhoneNumber": phone,
@@ -68,7 +80,7 @@ def stk_push(phone, amount):
     }
 
     headers = {
-        "Authorization": f"Bearer {mpesa_token()}",
+        "Authorization": f"Bearer {get_mpesa_token()}",
         "Content-Type": "application/json",
     }
 
@@ -78,7 +90,17 @@ def stk_push(phone, amount):
         headers=headers,
         timeout=10,
     )
+    logging.info(f"STK PUSH RESPONSE: {r.text}")
     return r.json()
+
+def send_whatsapp(phone, message):
+    phone = normalize_phone(phone)
+    client = Client(TWILIO_SID, TWILIO_AUTH)
+    client.messages.create(
+        from_="whatsapp:" + TWILIO_WHATSAPP_NUMBER,
+        to="whatsapp:" + phone,
+        body=message,
+    )
 
 # -------------------------
 # HEALTH
@@ -94,10 +116,9 @@ def health():
 def whatsapp():
     body = request.values.get("Body", "")
     sender = request.values.get("From", "")
-    phone = sender.replace("whatsapp:", "")
+    phone = normalize_phone(sender)
 
-    logging.info(f"WA from {phone}: {body}")
-
+    logging.info(f"WhatsApp from {phone}: {body}")
     msg = normalize(body)
     resp = MessagingResponse()
 
@@ -108,9 +129,7 @@ def whatsapp():
     amount = parse_amount(msg)
     if amount:
         PENDING[phone] = {"amount": amount, "time": time.time()}
-        resp.message(
-            f"💳 Amount *KES {amount}*\nReply *YES* to confirm or *NO* to cancel."
-        )
+        resp.message(f"💳 Amount KES {amount}\nReply *YES* to confirm or *NO* to cancel.")
         return Response(str(resp), mimetype="application/xml")
 
     if msg == "yes" and phone in PENDING:
@@ -135,19 +154,23 @@ def mpesa_callback():
     data = request.json
     logging.info(f"MPESA CALLBACK: {data}")
 
-    cb = data["Body"]["stkCallback"]
-    phone = cb.get("CallbackMetadata", {}).get("Item", [])[4].get("Value")
+    cb = data.get("Body", {}).get("stkCallback", {})
+    result_code = cb.get("ResultCode")
+    metadata_items = cb.get("CallbackMetadata", {}).get("Item", [])
 
-    if cb["ResultCode"] == 0:
-        # SUCCESS
-        from twilio.rest import Client
-        client = Client(os.environ["TWILIO_SID"], os.environ["TWILIO_AUTH"])
+    phone = None
+    if metadata_items:
+        # Safaricom always returns PhoneNumber somewhere in CallbackMetadata
+        for item in metadata_items:
+            if item.get("Name") == "PhoneNumber":
+                phone = str(item.get("Value"))
 
-        client.messages.create(
-            from_="whatsapp:" + os.environ["TWILIO_WHATSAPP_NUMBER"],
-            to="whatsapp:" + phone,
-            body="✅ Payment successful. Thank you!",
-        )
+    if phone and result_code == 0:
+        send_whatsapp(phone, "✅ Payment successful. Thank you!")
+        PENDING.pop(phone, None)
+    elif phone:
+        send_whatsapp(phone, "❌ Payment failed. Try again.")
+
     return jsonify({"ok": True})
 
 # -------------------------
