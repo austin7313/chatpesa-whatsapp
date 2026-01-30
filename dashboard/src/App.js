@@ -1,76 +1,119 @@
 import React, { useEffect, useState } from "react";
-import "./App.css";
+
+const API_URL = "https://chatpesa-whatsapp.onrender.com";
 
 function App() {
   const [orders, setOrders] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchOrders = async () => {
-    try {
-      const res = await fetch("/orders");
-      const data = await res.json();
-      if (data.status === "ok") {
-        setOrders(data.orders);
-      }
-    } catch (err) {
-      console.error("Error fetching orders:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [apiStatus, setApiStatus] = useState("CHECKING");
+  const [error, setError] = useState("");
 
   useEffect(() => {
+    checkApi();
     fetchOrders();
-
-    // Poll every 5 seconds for live updates
     const interval = setInterval(fetchOrders, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  const checkApi = async () => {
+    try {
+      const res = await fetch(`${API_URL}/`);
+      if (res.ok) {
+        setApiStatus("ONLINE");
+      } else {
+        setApiStatus("OFFLINE");
+      }
+    } catch (e) {
+      setApiStatus("OFFLINE");
+    }
+  };
+
+  const fetchOrders = async () => {
+    try {
+      const res = await fetch(`${API_URL}/orders`);
+      if (!res.ok) {
+        throw new Error("Orders endpoint error");
+      }
+      const data = await res.json();
+      setOrders(data);
+      setError("");
+      setApiStatus("ONLINE");
+    } catch (err) {
+      console.error("API ERROR:", err);
+      setApiStatus("OFFLINE");
+      setError("Failed to load orders");
+    }
+  };
+
+  const statusBadge = (status) => {
+    let bg = "#facc15"; // pending
+    if (status === "PAID") bg = "#16a34a";
+    if (status === "FAILED") bg = "#dc2626";
+
+    return (
+      <span
+        style={{
+          background: bg,
+          color: "#000",
+          padding: "4px 10px",
+          borderRadius: 12,
+          fontWeight: "bold",
+          fontSize: 12,
+        }}
+      >
+        {status || "PENDING"}
+      </span>
+    );
+  };
+
   return (
-    <div className="App">
-      <h1>ChatPesa Dashboard</h1>
-      {loading ? (
-        <p>Loading orders...</p>
-      ) : (
-        <table>
-          <thead>
+    <div style={{ padding: 20, fontFamily: "Arial" }}>
+      <h2>💳 ChatPesa Dashboard</h2>
+
+      <p>
+        API Status:{" "}
+        <strong style={{ color: apiStatus === "ONLINE" ? "green" : "red" }}>
+          {apiStatus}
+        </strong>
+      </p>
+
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
+      <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ background: "#111", color: "#fff" }}>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Amount</th>
+            <th>Status</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.length === 0 ? (
             <tr>
-              <th>ID</th>
-              <th>Customer</th>
-              <th>Phone</th>
-              <th>Amount</th>
-              <th>Service Requested</th>
-              <th>Status</th>
-              <th>MPESA Receipt</th>
-              <th>Created At</th>
-              <th>Paid At</th>
+              <td colSpan="6" style={{ textAlign: "center" }}>
+                No orders yet
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {orders.map((order) => (
-              <tr
-                key={order.id}
-                className={order.status === "PAID" ? "paid-row" : ""}
-              >
-                <td>{order.id}</td>
-                <td>{order.customer_name}</td>
-                <td>{order.phone}</td>
-                <td>{order.amount}</td>
-                <td>{order.service_requested}</td>
-                <td>{order.status}</td>
-                <td>{order.mpesa_receipt || "-"}</td>
-                <td>{new Date(order.created_at).toLocaleString()}</td>
+          ) : (
+            orders.map((o) => (
+              <tr key={o.id} style={{ borderBottom: "1px solid #ddd" }}>
+                <td>{o.id}</td>
+                <td>{o.name || "WhatsApp User"}</td>
+                <td>{o.phone}</td>
+                <td>KES {o.amount}</td>
+                <td>{statusBadge(o.status)}</td>
                 <td>
-                  {order.paid_at
-                    ? new Date(order.paid_at).toLocaleString()
+                  {o.created_at
+                    ? new Date(o.created_at).toLocaleString()
                     : "-"}
                 </td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
