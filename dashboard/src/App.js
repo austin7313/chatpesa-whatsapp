@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from "react";
 import "./App.css";
 
-const API_URL = "https://chatpesa-whatsapp.onrender.com"; // LIVE backend
+const API_URL = "https://chatpesa-whatsapp.onrender.com"; // 🔹 Your Render backend
 
 function App() {
   const [orders, setOrders] = useState([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // Fetch orders
   const fetchOrders = async () => {
     try {
       const res = await fetch(`${API_URL}/orders`);
@@ -21,12 +22,14 @@ function App() {
     }
   };
 
+  // Fetch initially and poll every 5s
   useEffect(() => {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  // Filter orders
   const filteredOrders = orders.filter(
     (o) =>
       o.id.toLowerCase().includes(search.toLowerCase()) ||
@@ -38,7 +41,9 @@ function App() {
     <div className="App">
       <header>
         <h1>ChatPesa Dashboard</h1>
-        <p>API Status: {loading ? "Loading..." : "ONLINE ✅"}</p>
+        <p className={`api-status ${loading ? "offline" : "online"}`}>
+          API Status: {loading ? "OFFLINE ❌" : "ONLINE ✅"}
+        </p>
         <input
           type="text"
           placeholder="Search by Order ID, Name or Phone..."
