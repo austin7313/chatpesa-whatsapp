@@ -1,103 +1,103 @@
 import React, { useEffect, useState } from "react";
 import "./App.css";
 
-const API_URL = "https://chatpesa-whatsapp.onrender.com"; // 🔹 Your Render backend
+const BACKEND_URL = "https://chatpesa-whatsapp.onrender.com"; // Replace if different
 
 function App() {
   const [orders, setOrders] = useState([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Fetch orders
   const fetchOrders = async () => {
     try {
-      const res = await fetch(`${API_URL}/orders`);
+      setLoading(true);
+      const res = await fetch(`${BACKEND_URL}/orders`);
       const data = await res.json();
       setOrders(data);
       setLoading(false);
     } catch (err) {
-      console.error("❌ Failed to fetch orders:", err);
-      setOrders([]);
+      console.error("Error fetching orders:", err);
       setLoading(false);
     }
   };
 
-  // Fetch initially and poll every 5s
   useEffect(() => {
     fetchOrders();
-    const interval = setInterval(fetchOrders, 5000);
+    const interval = setInterval(fetchOrders, 10000); // refresh every 10s
     return () => clearInterval(interval);
   }, []);
 
-  // Filter orders
   const filteredOrders = orders.filter(
     (o) =>
       o.id.toLowerCase().includes(search.toLowerCase()) ||
-      o.name.toLowerCase().includes(search.toLowerCase()) ||
-      o.phone.toLowerCase().includes(search.toLowerCase())
+      (o.name && o.name.toLowerCase().includes(search.toLowerCase())) ||
+      (o.phone && o.phone.toLowerCase().includes(search.toLowerCase()))
   );
 
   return (
     <div className="App">
       <header>
         <h1>ChatPesa Dashboard</h1>
-        <p className={`api-status ${loading ? "offline" : "online"}`}>
-          API Status: {loading ? "OFFLINE ❌" : "ONLINE ✅"}
-        </p>
+        {loading && <p style={{ color: "red" }}>API LOADING...</p>}
+      </header>
+
+      <div style={{ marginBottom: "1rem" }}>
         <input
           type="text"
           placeholder="Search by Order ID, Name or Phone..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          style={{ padding: "0.5rem", width: "300px" }}
         />
-      </header>
+      </div>
 
-      <main>
-        <table>
-          <thead>
+      <table>
+        <thead>
+          <tr>
+            <th>Order ID</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Amount</th>
+            <th>Status</th>
+            <th>Receipt</th>
+            <th>Service Requested</th>
+            <th>Created At</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filteredOrders.length === 0 && (
             <tr>
-              <th>Order ID</th>
-              <th>Name</th>
-              <th>Phone</th>
-              <th>Amount</th>
-              <th>Status</th>
-              <th>Created At</th>
-              <th>Receipt</th>
-              <th>🎯 Service Requested</th>
+              <td colSpan="8" style={{ textAlign: "center" }}>
+                {loading ? "Loading..." : "No orders found"}
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {filteredOrders.length === 0 ? (
-              <tr>
-                <td colSpan="8">No orders found</td>
-              </tr>
-            ) : (
-              filteredOrders.map((order) => (
-                <tr key={order.id}>
-                  <td>{order.id}</td>
-                  <td>{order.name}</td>
-                  <td>{order.phone}</td>
-                  <td>{order.amount}</td>
-                  <td>
-                    <span
-                      className={
-                        order.status.toLowerCase() === "paid"
-                          ? "status paid"
-                          : "status pending"
-                      }
-                    >
-                      {order.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td>{new Date(order.created_at).toLocaleString()}</td>
-                  <td>{order.receipt || "-"}</td>
-                  <td>{order.service || "-"}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </main>
+          )}
+          {filteredOrders.map((order) => (
+            <tr key={order.id}>
+              <td>{order.id}</td>
+              <td>{order.name}</td>
+              <td>{order.phone}</td>
+              <td>KES {order.amount}</td>
+              <td>
+                <span
+                  style={{
+                    padding: "0.25rem 0.5rem",
+                    borderRadius: "4px",
+                    color: "white",
+                    backgroundColor:
+                      order.status === "PAID" ? "green" : "orange",
+                  }}
+                >
+                  {order.status}
+                </span>
+              </td>
+              <td>{order.receipt || "—"}</td>
+              <td>{order.service || "—"}</td>
+              <td>{new Date(order.created_at).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
