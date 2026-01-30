@@ -7,53 +7,44 @@ function App() {
   const [apiStatus, setApiStatus] = useState("CHECKING");
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    checkApi();
-    fetchOrders();
-    const interval = setInterval(fetchOrders, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const checkApi = async () => {
-    try {
-      const res = await fetch(`${API_URL}/`);
-      if (res.ok) {
-        setApiStatus("ONLINE");
-      } else {
-        setApiStatus("OFFLINE");
-      }
-    } catch (e) {
-      setApiStatus("OFFLINE");
-    }
-  };
-
   const fetchOrders = async () => {
     try {
-      const res = await fetch(`${API_URL}/orders`);
+      const res = await fetch(`${API_URL}/orders`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      });
+
       if (!res.ok) {
-        throw new Error("Orders endpoint error");
+        throw new Error(`HTTP ${res.status}`);
       }
+
       const data = await res.json();
       setOrders(data);
-      setError("");
       setApiStatus("ONLINE");
+      setError("");
     } catch (err) {
-      console.error("API ERROR:", err);
+      console.error("API FETCH ERROR:", err);
       setApiStatus("OFFLINE");
-      setError("Failed to load orders");
+      setError("Backend not reachable");
     }
   };
 
-  const statusBadge = (status) => {
-    let bg = "#facc15"; // pending
-    if (status === "PAID") bg = "#16a34a";
-    if (status === "FAILED") bg = "#dc2626";
+  useEffect(() => {
+    fetchOrders();
+    const i = setInterval(fetchOrders, 5000);
+    return () => clearInterval(i);
+  }, []);
 
+  const badge = (status) => {
+    const map = {
+      PAID: "#16a34a",
+      FAILED: "#dc2626",
+      PENDING: "#facc15",
+    };
     return (
       <span
         style={{
-          background: bg,
-          color: "#000",
+          background: map[status] || "#facc15",
           padding: "4px 10px",
           borderRadius: 12,
           fontWeight: "bold",
@@ -98,12 +89,12 @@ function App() {
             </tr>
           ) : (
             orders.map((o) => (
-              <tr key={o.id} style={{ borderBottom: "1px solid #ddd" }}>
+              <tr key={o.id}>
                 <td>{o.id}</td>
                 <td>{o.name || "WhatsApp User"}</td>
                 <td>{o.phone}</td>
                 <td>KES {o.amount}</td>
-                <td>{statusBadge(o.status)}</td>
+                <td>{badge(o.status)}</td>
                 <td>
                   {o.created_at
                     ? new Date(o.created_at).toLocaleString()
