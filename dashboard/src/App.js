@@ -1,110 +1,99 @@
 import React, { useEffect, useState } from "react";
+import "./App.css"; // make sure this exists in src/
 
-const API_URL = "https://chatpesa-whatsapp.onrender.com";
+const API_URL = "https://chatpesa-whatsapp.onrender.com"; // LIVE backend
 
 function App() {
   const [orders, setOrders] = useState([]);
-  const [apiStatus, setApiStatus] = useState("CHECKING");
-  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
 
+  // Fetch orders from backend
   const fetchOrders = async () => {
     try {
-      const res = await fetch(`${API_URL}/orders`, {
-        method: "GET",
-        headers: { "Content-Type": "application/json" },
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
+      const res = await fetch(`${API_URL}/orders`);
       const data = await res.json();
       setOrders(data);
-      setApiStatus("ONLINE");
-      setError("");
+      setLoading(false);
     } catch (err) {
-      console.error("API FETCH ERROR:", err);
-      setApiStatus("OFFLINE");
-      setError("Backend not reachable");
+      console.error("❌ Failed to fetch orders:", err);
+      setOrders([]);
+      setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchOrders();
-    const i = setInterval(fetchOrders, 5000);
-    return () => clearInterval(i);
+    const interval = setInterval(fetchOrders, 5000); // refresh every 5s
+    return () => clearInterval(interval);
   }, []);
 
-  const badge = (status) => {
-    const map = {
-      PAID: "#16a34a",
-      FAILED: "#dc2626",
-      PENDING: "#facc15",
-    };
-    return (
-      <span
-        style={{
-          background: map[status] || "#facc15",
-          padding: "4px 10px",
-          borderRadius: 12,
-          fontWeight: "bold",
-          fontSize: 12,
-        }}
-      >
-        {status || "PENDING"}
-      </span>
-    );
-  };
+  // Filter orders by search input
+  const filteredOrders = orders.filter((o) =>
+    o.id.toLowerCase().includes(search.toLowerCase()) ||
+    o.name.toLowerCase().includes(search.toLowerCase()) ||
+    o.phone.toLowerCase().includes(search.toLowerCase())
+  );
 
   return (
-    <div style={{ padding: 20, fontFamily: "Arial" }}>
-      <h2>💳 ChatPesa Dashboard</h2>
+    <div className="App">
+      <header>
+        <h1>ChatPesa Dashboard</h1>
+        <p>API Status: {loading ? "Loading..." : "ONLINE ✅"}</p>
+        <input
+          type="text"
+          placeholder="Search by Order ID, Name or Phone..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </header>
 
-      <p>
-        API Status:{" "}
-        <strong style={{ color: apiStatus === "ONLINE" ? "green" : "red" }}>
-          {apiStatus}
-        </strong>
-      </p>
-
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ background: "#111", color: "#fff" }}>
-            <th>ID</th>
-            <th>Name</th>
-            <th>Phone</th>
-            <th>Amount</th>
-            <th>Status</th>
-            <th>Created</th>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.length === 0 ? (
+      <main>
+        <table>
+          <thead>
             <tr>
-              <td colSpan="6" style={{ textAlign: "center" }}>
-                No orders yet
-              </td>
+              <th>Order ID</th>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Created At</th>
+              <th>Receipt</th>
+              <th>🎯 Service Requested</th>
             </tr>
-          ) : (
-            orders.map((o) => (
-              <tr key={o.id}>
-                <td>{o.id}</td>
-                <td>{o.name || "WhatsApp User"}</td>
-                <td>{o.phone}</td>
-                <td>KES {o.amount}</td>
-                <td>{badge(o.status)}</td>
-                <td>
-                  {o.created_at
-                    ? new Date(o.created_at).toLocaleString()
-                    : "-"}
-                </td>
+          </thead>
+          <tbody>
+            {filteredOrders.length === 0 ? (
+              <tr>
+                <td colSpan="8">No orders found</td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : (
+              filteredOrders.map((order) => (
+                <tr key={order.id}>
+                  <td>{order.id}</td>
+                  <td>{order.name}</td>
+                  <td>{order.phone}</td>
+                  <td>{order.amount}</td>
+                  <td>
+                    <span
+                      className={
+                        order.status.toLowerCase() === "paid"
+                          ? "status paid"
+                          : "status pending"
+                      }
+                    >
+                      {order.status.toUpperCase()}
+                    </span>
+                  </td>
+                  <td>{new Date(order.created_at).toLocaleString()}</td>
+                  <td>{order.receipt || "-"}</td>
+                  <td>{order.service || "-"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </main>
     </div>
   );
 }
