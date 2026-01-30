@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from "react";
 import "./App.css";
 
-const BACKEND_URL = "https://chatpesa-whatsapp.onrender.com"; // Replace if different
-
 function App() {
   const [orders, setOrders] = useState([]);
   const [search, setSearch] = useState("");
@@ -10,8 +8,7 @@ function App() {
 
   const fetchOrders = async () => {
     try {
-      setLoading(true);
-      const res = await fetch(`${BACKEND_URL}/orders`);
+      const res = await fetch(`${process.env.REACT_APP_API_URL || "http://localhost:5000"}/orders`);
       const data = await res.json();
       setOrders(data);
       setLoading(false);
@@ -23,33 +20,28 @@ function App() {
 
   useEffect(() => {
     fetchOrders();
-    const interval = setInterval(fetchOrders, 10000); // refresh every 10s
+    const interval = setInterval(fetchOrders, 5000); // refresh every 5 sec
     return () => clearInterval(interval);
   }, []);
 
   const filteredOrders = orders.filter(
     (o) =>
       o.id.toLowerCase().includes(search.toLowerCase()) ||
-      (o.name && o.name.toLowerCase().includes(search.toLowerCase())) ||
-      (o.phone && o.phone.toLowerCase().includes(search.toLowerCase()))
+      o.customer_name?.toLowerCase().includes(search.toLowerCase()) ||
+      o.phone?.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
     <div className="App">
-      <header>
-        <h1>ChatPesa Dashboard</h1>
-        {loading && <p style={{ color: "red" }}>API LOADING...</p>}
-      </header>
-
-      <div style={{ marginBottom: "1rem" }}>
-        <input
-          type="text"
-          placeholder="Search by Order ID, Name or Phone..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ padding: "0.5rem", width: "300px" }}
-        />
-      </div>
+      <h1>ChatPesa Dashboard</h1>
+      {loading ? <p>Loading orders...</p> : null}
+      <input
+        type="text"
+        placeholder="Search by Order ID, Name or Phone..."
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="search-input"
+      />
 
       <table>
         <thead>
@@ -60,39 +52,26 @@ function App() {
             <th>Amount</th>
             <th>Status</th>
             <th>Receipt</th>
-            <th>Service Requested</th>
             <th>Created At</th>
           </tr>
         </thead>
         <tbody>
-          {filteredOrders.length === 0 && (
-            <tr>
-              <td colSpan="8" style={{ textAlign: "center" }}>
-                {loading ? "Loading..." : "No orders found"}
-              </td>
-            </tr>
-          )}
           {filteredOrders.map((order) => (
             <tr key={order.id}>
               <td>{order.id}</td>
-              <td>{order.name}</td>
+              <td>{order.customer_name || "Unknown"}</td>
               <td>{order.phone}</td>
               <td>KES {order.amount}</td>
               <td>
                 <span
-                  style={{
-                    padding: "0.25rem 0.5rem",
-                    borderRadius: "4px",
-                    color: "white",
-                    backgroundColor:
-                      order.status === "PAID" ? "green" : "orange",
-                  }}
+                  className={`status-badge ${
+                    order.status?.toLowerCase() === "paid" ? "paid" : "pending"
+                  }`}
                 >
                   {order.status}
                 </span>
               </td>
-              <td>{order.receipt || "—"}</td>
-              <td>{order.service || "—"}</td>
+              <td>{order.receipt || "-"}</td>
               <td>{new Date(order.created_at).toLocaleString()}</td>
             </tr>
           ))}
