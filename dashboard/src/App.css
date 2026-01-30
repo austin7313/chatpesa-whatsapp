@@ -1,73 +1,49 @@
-/* General container */
 .App {
-  max-width: 1200px;
-  margin: 2rem auto;
-  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-  color: #333;
+  font-family: Arial, sans-serif;
+  padding: 20px;
 }
 
-/* Header */
-header {
-  margin-bottom: 1.5rem;
+h1 {
+  text-align: center;
+  margin-bottom: 20px;
 }
 
-header h1 {
-  font-size: 2rem;
-  margin-bottom: 0.3rem;
-}
-
-header input[type="text"] {
-  padding: 0.5rem;
+.search-input {
   width: 100%;
-  font-size: 1rem;
-  border-radius: 6px;
-  border: 1px solid #ccc;
+  max-width: 400px;
+  padding: 8px;
+  margin-bottom: 20px;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
 }
 
-/* API status */
-.api-status.online {
-  color: green;
-  font-weight: bold;
-}
-
-.api-status.offline {
-  color: red;
-  font-weight: bold;
-}
-
-/* Table styling */
 table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 1rem;
-  box-shadow: 0 0 8px rgba(0,0,0,0.05);
 }
 
 th, td {
-  padding: 0.75rem 1rem;
+  border: 1px solid #ddd;
+  padding: 8px;
   text-align: left;
-  border-bottom: 1px solid #eee;
 }
 
 th {
-  background-color: #f9f9f9;
-  font-weight: 600;
+  background-color: #f4f4f4;
 }
 
-/* Status badges */
-.status {
-  padding: 0.3rem 0.6rem;
+.status-badge {
+  padding: 4px 8px;
   border-radius: 4px;
-  color: #fff;
   font-weight: bold;
-  font-size: 0.85rem;
-  display: inline-block;
+  color: white;
 }
 
-.status.paid {
-  background-color: #28a745;
+.status-badge.paid {
+  background-color: #28a745; /* green */
 }
 
-.status.pending {
-  background-color: #fd7e14;
+.status-badge.pending {
+  background-color: #ffc107; /* yellow */
 }
