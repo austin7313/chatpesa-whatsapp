@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import "./App.css"; // make sure this exists in src/
+import "./App.css";
 
 const API_URL = "https://chatpesa-whatsapp.onrender.com"; // LIVE backend
 
@@ -8,7 +8,6 @@ function App() {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Fetch orders from backend
   const fetchOrders = async () => {
     try {
       const res = await fetch(`${API_URL}/orders`);
@@ -24,15 +23,15 @@ function App() {
 
   useEffect(() => {
     fetchOrders();
-    const interval = setInterval(fetchOrders, 5000); // refresh every 5s
+    const interval = setInterval(fetchOrders, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // Filter orders by search input
-  const filteredOrders = orders.filter((o) =>
-    o.id.toLowerCase().includes(search.toLowerCase()) ||
-    o.name.toLowerCase().includes(search.toLowerCase()) ||
-    o.phone.toLowerCase().includes(search.toLowerCase())
+  const filteredOrders = orders.filter(
+    (o) =>
+      o.id.toLowerCase().includes(search.toLowerCase()) ||
+      o.name.toLowerCase().includes(search.toLowerCase()) ||
+      o.phone.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
