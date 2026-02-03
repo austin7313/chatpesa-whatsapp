@@ -1,67 +1,36 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-import os
-from datetime import datetime
+.App {
+  text-align: center;
+  font-family: Arial, sans-serif;
+}
 
-app = Flask(__name__)
+.App-header {
+  padding: 2rem;
+}
 
-# ✅ Allow ALL origins (dashboard, localhost, vercel)
-CORS(app, resources={r"/*": {"origins": "*"}})
+table {
+  margin: 2rem auto;
+  border-collapse: collapse;
+  width: 80%;
+}
 
-# -------------------------
-# HEALTH CHECK (CRITICAL)
-# -------------------------
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({
-        "status": "ok"
-    }), 200
+th, td {
+  border: 1px solid #ccc;
+  padding: 0.5rem 1rem;
+  text-align: center;
+}
 
-# -------------------------
-# ROOT (OPTIONAL)
-# -------------------------
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({
-        "service": "ChatPesa Backend",
-        "status": "online",
-        "timestamp": datetime.utcnow().isoformat()
-    })
+th {
+  background-color: #f4f4f4;
+}
 
-# -------------------------
-# ORDERS (MOCK SAFE)
-# -------------------------
-@app.route("/orders", methods=["GET"])
-def orders():
-    return jsonify([]), 200
+.paid {
+  background-color: #4caf50;
+  color: white;
+  font-weight: bold;
+}
 
-# -------------------------
-# DIAGNOSTICS (KEEP)
-# -------------------------
-@app.route("/diagnostics", methods=["GET"])
-def diagnostics():
-    return jsonify({
-        "service": "ChatPesa Backend",
-        "status": "online",
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": {
-            "DATABASE_URL": bool(os.getenv("DATABASE_URL")),
-            "TWILIO_ACCOUNT_SID": bool(os.getenv("TWILIO_ACCOUNT_SID")),
-            "TWILIO_AUTH_TOKEN": bool(os.getenv("TWILIO_AUTH_TOKEN")),
-            "TWILIO_WHATSAPP_NUMBER": bool(os.getenv("TWILIO_WHATSAPP_NUMBER")),
-        }
-    })
-
-# -------------------------
-# WHATSAPP WEBHOOK (STUB)
-# -------------------------
-@app.route("/webhook/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    return "OK", 200
-
-# -------------------------
-# RUN
-# -------------------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+.pending {
+  background-color: #ff9800;
+  color: white;
+  font-weight: bold;
+}
